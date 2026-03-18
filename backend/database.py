@@ -89,3 +89,18 @@ async def save_tts_position(user_id: int, book_id: str, tts_cfi: str):
             UPDATE user_books SET tts_cfi = ? WHERE user_id = ? AND book_id = ?
         """, (tts_cfi, user_id, book_id))
         await db.commit()
+
+async def update_reading_progress(user_id: int, book_id: str, cfi: str, percentage: float):
+    """
+    🌟 进度保存中枢：如果没读过就新建记录，读过就更新进度。
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        # 使用 INSERT OR REPLACE 确保即使是第一次读也能存进去
+        await db.execute("""
+            INSERT OR REPLACE INTO user_books 
+            (user_id, book_id, current_cfi, progress_percentage, last_read_at)
+            VALUES (
+                ?, ?, ?, ?, CURRENT_TIMESTAMP
+            )
+        """, (user_id, book_id, cfi, percentage))
+        await db.commit()

@@ -20,7 +20,7 @@
         ❮ BACK
       </button>
       <button @click="toggleTTS" class="text-neutral-400 hover:text-white text-sm tracking-widest font-mono flex items-center gap-2 transition-colors">
-        <span>{{ isReading ? '⏹ STOP TTS' : '▶️ READ ALOUD' }}</span>
+        <span>{{ isReading ? 'STOP' : 'READ' }}</span>
       </button>
     </div>
 
@@ -29,7 +29,7 @@
       class="absolute bottom-0 left-0 right-0 h-16 bg-neutral-900/95 backdrop-blur-md border-t border-neutral-800 flex justify-between items-center px-6 z-40 transition-transform duration-300 animate-fade-in"
     >
       <button @click="openTocOverlay" class="text-neutral-400 hover:text-white text-sm tracking-widest font-mono flex items-center gap-2 transition-colors">
-        ☰ 章节
+        ☰
       </button>
       
       <div class="flex items-center gap-2 text-sm font-mono z-50">
@@ -145,35 +145,80 @@ onUnmounted(() => {
   }
 });
 
-const initReader = () => {
-  // 假定后端可以直接通过书籍 ID 提供 EPUB 文件流
-  epubBook = ePub(`${backendApi}/books/${props.book.id}.epub`); 
+const initReader = async () => {
+  // 1. 获取进度
+  const res = await fetch(`/api/books/${props.book.id}/progress`);
+  const data = await res.json();
+  const savedCfi = data.cfi;
 
+  // 2. 初始化书籍
+  epubBook = ePub(`/api/static/books/${props.book.id}.epub`);
+
+  // 3. 恢复为稳定且清爽的滚动模式
   rendition = epubBook.renderTo(viewer.value, {
     width: '100%',
     height: '100%',
-    flow: 'scrolled-doc', // 滚动流模式，适合极简阅读
-    manager: 'continuous',
+    flow: 'scrolled-doc', // ⬅️ 回到滚动模式
+    manager: 'continuous'
   });
 
-  rendition.display();
+  // 4. 恢复你最开始的干净主题
+  rendition.themes.default({
+    body: {
+      'background-color': '#000000 !important',
+      'color': '#d4d4d4 !important',
+      'line-height': '1.6 !important', // 核心倍率
+      'margin': '0 !important',
+      'padding': '0 40px !important'
+    },
+    '::selection': {
+      'background': '#333333 !important'
+    }
+  });
+ // 5. 🚀 执行渲染：文字出来后再跑分页，防止灰屏 
+    rendition.display(savedCfi || undefined).then(() => {
+      console.log("🪄 文字已加载，后台开始计算分页...");
+      generatePagination(savedCfi);
+    });
 
-  // 监听选中文本，触发高亮与字典/维基
-  rendition.on('selected', handleSelection);
-  
-  // 生成虚拟页码
-  generatePagination();
+    // 监听选中事件
+    rendition.on('selected', handleSelection);
 };
-
 // ==========================================
 // 2. 交互与布局控制
 // ==========================================
+const setupIframeClick = () => {
+  rendition.on('click', (e) => {
+    // 弹窗逻辑保持
+    if (showTocOverlay.value || showWiki.value) {
+      showTocOverlay.value = false;
+      showWiki.value = false;
+      return;
+    }
+
+    const scrollContainer = rendition.manager.container;
+    if (!scrollContainer) return;
+
+    // 100% 高度硬跳
+    const jumpStep = scrollContainer.clientHeight; 
+
+    if (e.clientX < window.innerWidth * 0.3) {
+      // 向上跳转，去掉 behavior: 'smooth'
+      scrollContainer.scrollBy({ top: -jumpStep, left: 0 });
+    } else if (e.clientX > window.innerWidth * 0.7) {
+      // 向下跳转
+      scrollContainer.scrollBy({ top: jumpStep, left: 0 });
+    } else {
+      showBars.value = !showBars.value;
+    }
+  });
+};
+// --- 接管外部控制区域的点击 ---
 const handleTouch = (event) => {
   const rect = readerMain.value.getBoundingClientRect();
   const clickX = event.clientX - rect.left;
   const width = rect.width;
 
-  // 屏蔽点击穿透导致的意外翻页
   if (showTocOverlay.value || showWiki.value) return;
 
   if (clickX < width * 0.3) {
@@ -181,11 +226,9 @@ const handleTouch = (event) => {
   } else if (clickX > width * 0.7) {
     rendition.next();
   } else {
-    // 点击中间区域，切换菜单显示状态
     showBars.value = !showBars.value;
   }
 };
-
 const openTocOverlay = () => {
   showBars.value = false;
   showTocOverlay.value = true;
@@ -232,14 +275,16 @@ const summonReference = async (query) => {
 };
 
 // ==========================================
-// 4. 分页与排版 (计算虚拟页码)
+// 4. 分页与排版 (计算虚拟页码 - 原始版)
 // ==========================================
 const generatePagination = async () => {
   if (!epubBook) return;
-  // 每 1600 字符算作一页
+
+  // 1. 每 1600 字符算作一页 (原始精度)
   await epubBook.locations.generate(1600);
   totalPages.value = epubBook.locations.total;
 
+  // 2. 原始的监听逻辑：只更新本地显示，不发请求给后端
   rendition.on('relocated', (location) => {
     let rawPage = epubBook.locations.percentageFromCfi(location.start.cfi);
     currentPage.value = Math.round(rawPage * totalPages.value) || 1;
@@ -250,7 +295,7 @@ const generatePagination = async () => {
 const jumpToTargetPage = () => {
   const target = parseInt(inputPage.value);
   if (isNaN(target) || target < 1 || target > totalPages.value) {
-    inputPage.value = currentPage.value; // 非法输入则回退
+    inputPage.value = currentPage.value;
     return;
   }
   const cfi = epubBook.locations.cfiFromPercentage(target / totalPages.value);
@@ -262,7 +307,6 @@ const cycleFontSize = () => {
   const currentIndex = sizes.indexOf(currentFontSize.value);
   currentFontSize.value = sizes[(currentIndex + 1) % sizes.length];
   rendition.themes.fontSize(`${currentFontSize.value}%`);
-  // 注意：真实环境中字号改变需要重新调用 epubBook.locations.generate() 重新分页
 };
 
 // ==========================================
@@ -338,6 +382,12 @@ const jumpToNextChapter = async () => {
 </script>
 
 <style scoped>
+/* 确保 viewer 占满屏幕即可 */
+#viewer {
+  width: 100%;
+  /* 修复 1：使用 dvh 获取真实的移动端可视高度，保留 vh 作为旧设备兜底 */
+  height: 100dvh; 
+}
 /* 极简淡入动画 */
 .animate-fade-in {
   animation: fadeIn 0.2s ease-out forwards;

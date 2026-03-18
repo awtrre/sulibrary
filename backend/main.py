@@ -1,22 +1,35 @@
+from contextlib import asynccontextmanager
+from database import init_db 
+import uuid
 import hashlib
 import os
 import httpx
 import aiosqlite
 import shutil
 from pathlib import Path
+from fastapi.staticfiles import StaticFiles
 from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, HTMLResponse
 from pydantic import BaseModel
 from typing import Optional
+# 🪄 城堡启动与关闭的生命周期管理
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    print("🪄 正在唤醒记忆水晶，构建数字城堡的藏书阁...")
+    # 启动时执行建表逻辑
+    await init_db()
+    yield
+    # 关闭时的清理逻辑（暂时留空即可）
+    print("🏰 数字城堡进入休眠状态...")
 
-# 🏰 实例化我们的城堡大管家
+# 🏰 实例化我们的城堡大管家 (修改这里，把 lifespan 挂载上去)
 app = FastAPI(
     title="极简黑白数字图书馆 API",
     description="专为极客殿下树莓派打造的专属阅读后端",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan  # <-- 重点加这一行！
 )
-
 # 🛡️ 魔法护盾：CORS 跨域配置 (让前端 Vue/React 能顺利串门)
 app.add_middleware(
     CORSMiddleware,
@@ -25,6 +38,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# 挂载 data 目录，让前端可以直接通过 /api/static/xxx 访问封面和书籍
+app.mount("/api/static", StaticFiles(directory="/app/data"), name="static")
 
 # -----------------------------------------------------------------
 # 🗂️ 数据模型定义 (魔法契约书)
@@ -80,50 +95,115 @@ async def library_login(request: AuthRequest):
 async def geek_logout():
     """虽然前端清除了 Token，但后端也可以在这里做一些 Token 失效的黑名单操作哦~"""
     return {"status": "success", "message": "已断开神经连接，期待您再次降临！"}
+# -----------------------------------------------------------------
+# 🔖 书籍进度管理 (解决问题 1 & 2)
+# -----------------------------------------------------------------
 
+# 获取进度接口
+@app.get("/api/books/{book_id}/progress")
+async def get_progress(book_id: str, user_id: int = 1): # 这里的 user_id 先写死为 1
+    from database import DB_PATH
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT current_cfi FROM user_books WHERE user_id = ? AND book_id = ?", 
+            (user_id, book_id)
+        )
+        res = await cursor.fetchone()
+        return {"cfi": res["current_cfi"] if res else None}
+
+# 保存进度接口
+@app.post("/api/books/{book_id}/progress")
+async def save_progress(book_id: str, payload: dict, user_id: int = 1):
+    from database import update_reading_progress
+    cfi = payload.get("cfi")
+    percent = payload.get("percent", 0)
+    await update_reading_progress(user_id, book_id, cfi, percent)
+    return {"status": "success"}
 # -----------------------------------------------------------------
 # 📚 书架与图书管理模块 (你的灵魂安放之处)
 # -----------------------------------------------------------------
 @app.get("/api/books")
 async def get_bookshelf(
-    user_token: Optional[str] = Header(None), 
+    user_token: Optional[str] = Header(None),
     guest_uuid: Optional[str] = Header(None)
 ):
     """
-    获取书架列表。
-    如果有 user_token，返回该用户的专属书架；
-    如果只有 guest_uuid (幽灵记忆)，则返回与之绑定的游客书架！👻
+    获取书架列表。目前先简单粗暴地把库里所有的书都拉出来展示！
+    （后续可以根据 user_id 或 guest_uuid 来做隔离）
     """
-    # TODO: 根据身份标识去 SQLite 里拉取对应的书架布局和书籍列表
-    return {"status": "success", "books": [], "layout": "grid"}
+    db_path = "/app/data/library.db"
+    books = []
+    
+    try:
+        async with aiosqlite.connect(db_path) as db:
+            # 去皇家藏书阁 (books) 捞取所有的书
+            cursor = await db.execute("SELECT id, title, author, format FROM books ORDER BY added_at DESC")
+            rows = await cursor.fetchall()
+            
+            for row in rows:
+                books.append({
+                    "id": row[0],
+                    "title": row[1],
+                    "author": row[2] or "佚名",
+                    "format": row[3],
+                    "progress": 0 # 这里先默认 0，后续再联合 user_books 表拉取真实进度
+                })
+        
+        return {"status": "success", "books": books, "layout": "grid"}
+    except Exception as e:
+        print(f"💥 记忆中枢读取失败: {e}")
+        return {"status": "error", "books": []}
 
 @app.post("/api/books/upload")
 async def upload_magic_book(
-    background_tasks: BackgroundTasks, 
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...)
 ):
-    """
-    处理书籍上传。TXT/MOBI/AZW3 上传后，立刻丢给后台任务去熬制成 EPUB！
-    """
+    """处理书籍上传，并真正将其写入记忆中枢！"""
     file_ext = Path(file.filename).suffix.lower()
-    save_path = f"./data/raw_books/{file.filename}"
+    book_id = str(uuid.uuid4()) # 生成唯一的魔法编号
     
-    # 1. 先把书本存下来
+    # 为了防止同名文件冲突，保存时加上 ID
+    save_filename = f"{book_id}{file_ext}"
+    title = Path(file.filename).stem
+
+    # 💡 核心修复：智能分流传送阵
+    if file_ext == '.epub':
+        # 已经是完美的 epub，直接送入藏书阁
+        target_dir = "/app/data/books"
+        format_type = "epub"
+    else:
+        # 其他格式，先扔进原料库准备炼金转换
+        target_dir = "/app/data/raw_books"
+        format_type = file_ext.replace('.', '')
+
+    # 🛡️ 加一层护盾：确保目录存在，防止 500 报错
+    os.makedirs(target_dir, exist_ok=True)
+    
+    save_path = f"{target_dir}/{save_filename}"
+
+    # 1. 物理保存文件
     with open(save_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
-    
-    # 2. 召唤转换大锅炉！
-    if file_ext in ['.mobi', '.azw3', '.txt']:
-        # 后台静默执行，绝不让殿下在前台干等！
-        background_tasks.add_task(convert_to_epub_task, save_path)
-        return {"status": "processing", "message": "已送入炼金炉，正在为您转换为完美的 EPUB！"}
-    
-    return {"status": "success", "message": "上传成功！原汁原味呈现！"}
 
-async def convert_to_epub_task(file_path: str):
-    """后台调用 Calibre 命令行或者 Docker 容器进行转换的守护进程"""
-    # TODO: 接入 calibre 的 ebook-convert 命令
-    print(f"🪄 正在施展变形术：将 {file_path} 转换为 EPUB...")
+    # 2. 写入数据库！
+    db_path = "/app/data/library.db"
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            "INSERT INTO books (id, title, file_path, format) VALUES (?, ?, ?, ?)",
+            (book_id, title, save_path, format_type)
+        )
+        await db.commit()
+
+    # 3. 召唤转换大锅炉 (如果需要转换)
+    if file_ext in ['.mobi', '.azw3', '.txt', '.pdf']:
+        # TODO: 这里需要确保 convert_to_epub_task 转换完成后，
+        # 把新生成的 epub 移动到 /app/data/books/，并更新数据库的 file_path！
+        background_tasks.add_task(convert_to_epub_task, save_path, book_id)
+        return {"status": "processing", "message": "已入库！正在后台转为 EPUB..."}
+
+    return {"status": "success", "message": "上传成功！原汁原味呈现！"}
 
 @app.delete("/api/books/{book_id}")
 async def delete_book(book_id: str):
