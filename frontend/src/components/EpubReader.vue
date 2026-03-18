@@ -1,9 +1,9 @@
 <template>
   <div class="fixed inset-0 bg-neutral-900 text-neutral-100 flex overflow-hidden z-50 font-sans">
     
-    <div class="relative h-full flex-grow border-r border-neutral-800" ref="readerMain">
+    <div class="relative h-full flex-grow border-r border-neutral-800 bg-black flex items-center justify-center overflow-hidden" ref="readerMain">
       
-      <div id="viewer" ref="viewer" class="h-full w-full"></div>
+      <div id="viewer" ref="viewer" class="w-full" :style="{ height: exactViewerHeight }"></div>
       
       <div class="absolute inset-0 grid grid-cols-[30%_40%_30%] z-10" @click="handleTouch">
         <div class="cursor-pointer"></div>
@@ -59,7 +59,8 @@
           <button @click="activeOverlayTab = 'highlights'" :class="activeOverlayTab === 'highlights' ? 'text-neutral-100 border-b-2 border-neutral-100' : 'text-neutral-600 hover:text-neutral-400'" class="pb-1 transition-all">勾画</button>
           <button @click="activeOverlayTab = 'notes'" :class="activeOverlayTab === 'notes' ? 'text-neutral-100 border-b-2 border-neutral-100' : 'text-neutral-600 hover:text-neutral-400'" class="pb-1 transition-all">批注</button>
         </div>
-        <div class="w-16"></div> </div>
+        <div class="w-16"></div> 
+      </div>
       
       <div class="flex-1 overflow-y-auto p-8 max-w-3xl mx-auto w-full scrollbar-hide">
         <ul v-if="activeOverlayTab === 'toc'" class="space-y-4">
@@ -90,7 +91,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue';
+import { ref, onMounted, onUnmounted,nextTick } from 'vue';
 import ePub from 'epubjs';
 
 const props = defineProps({
@@ -125,13 +126,106 @@ const currentPage = ref(1);
 const totalPages = ref('???');
 const inputPage = ref('1');
 const currentFontSize = ref(100);
+const currentLineHeightPx = ref(26); // 默认给个整数
+const exactViewerHeight = ref('100dvh');
 
 // --- TTS 引擎状态 ---
 const isReading = ref(false);
 let currentSpineIndex = 0;
 let textNodes = [];
 let currentNodeIndex = 0;
+// ==========================================
+// 终极版主题注入：绝对网格对齐
+// ==========================================
+const applyTheme = () => {
+  if (!rendition) return;
+  
+  // 算出绝对的整数行高
+  const baseSize = 16 * (currentFontSize.value / 100);
+  const absoluteLineHeight = Math.floor(baseSize * 1.6);
+  currentLineHeightPx.value = absoluteLineHeight;
 
+  // 锁定容器完美高度
+  const screenHeight = window.innerHeight; 
+  const maxLines = Math.floor(screenHeight / absoluteLineHeight);
+  exactViewerHeight.value = `${maxLines * absoluteLineHeight}px`;
+
+  rendition.themes.default({
+    // 基础内联元素
+    'body, span, a, b, i, em, strong': {
+      'background-color': '#000000 !important',
+      'color': '#d4d4d4 !important',
+      'line-height': `${absoluteLineHeight}px !important`,
+    },
+
+    // 核心块级元素：暴力抹杀一切异样！
+    // 扩充了捕获范围：figcaption, .caption, .notes 统统拉入网格！
+    'p, div, blockquote, ul, ol, li, pre, section, article, figcaption, .caption, .notes': {
+      'line-height': `${absoluteLineHeight}px !important`,
+      'margin-top': '0 !important', 
+      'margin-bottom': `${absoluteLineHeight}px !important`, // 段后距完美 1 倍行高
+      'padding': '0 !important' // 严禁内边距撑开！
+    },
+
+    // ==========================================
+    // 新增：角标【1】的绝杀中和方案 (解决 vertical-align 导致的行高增加)
+    // ==========================================
+    'sup, sub': {
+      // 1. 强制行高为 0！这样它绝不会增加父级行框的高度。
+      'line-height': '0 !important', 
+      // 2. 核心！将垂直对齐设为基线，废除浏览器的 super 抬高效果。
+      'vertical-align': 'baseline !important', 
+      // 3. 准备进行手工微调位置，不影响父级高度计算。
+      'position': 'relative !important', 
+      // 4. 标准的角标小字号。
+      'font-size': '75% !important' 
+    },
+    'sup': {
+      // 5. 手工微调：向上移动 0.5em，视觉上看起来是角标，但物理高度依然在 26px 网格内！
+      'top': '-0.5em !important' 
+    },
+    'sub': {
+      // 下标向下移动。
+      'bottom': '-0.25em !important' 
+    },
+    // ==========================================
+
+    // 标题
+    'h1, h2, h3, h4, h5, h6': {
+      'line-height': `${absoluteLineHeight * 2}px !important`,
+      'margin-top': `${absoluteLineHeight}px !important`,
+      'margin-bottom': `${absoluteLineHeight}px !important`,
+      'padding': '0 !important'
+    },
+
+    // 图片与多媒体
+    'img, svg, video': {
+      'display': 'block !important', 
+      'vertical-align': 'top !important',
+      'margin': `0 auto ${absoluteLineHeight}px auto !important`, 
+      'padding': '0 !important',
+      'border': 'none !important',
+      'max-width': '100% !important'
+    },
+    'figure, .image-wrap, .fig': {
+      'margin': '0 !important', 
+      'padding': '0 !important',
+      'line-height': '0 !important' 
+    },
+
+    // 分割线 hr
+    'hr': {
+      'margin': `${absoluteLineHeight}px 0 !important`,
+      'height': '1px !important',
+      'border': 'none !important',
+      'background-color': '#333333 !important'
+    },
+
+    '::selection': {
+      'background': '#333333 !important'
+    }
+  });
+};
 // ==========================================
 // 1. 生命周期与初始化
 // ==========================================
@@ -144,7 +238,7 @@ onUnmounted(() => {
     epubBook.destroy();
   }
 });
-
+ 
 const initReader = async () => {
   // 1. 获取进度
   const res = await fetch(`/api/books/${props.book.id}/progress`);
@@ -153,7 +247,7 @@ const initReader = async () => {
 
   // 2. 初始化书籍
   epubBook = ePub(`/api/static/books/${props.book.id}.epub`);
-
+  // ==========================================
   // 3. 恢复为稳定且清爽的滚动模式
   rendition = epubBook.renderTo(viewer.value, {
     width: '100%',
@@ -161,59 +255,109 @@ const initReader = async () => {
     flow: 'scrolled-doc', // ⬅️ 回到滚动模式
     manager: 'continuous'
   });
+  // 第4步：再注册 Hook，劫持图片
+  rendition.hooks.content.register((contents) => {
+    const doc = contents.document;
+    const mediaElements = doc.querySelectorAll('img, svg, video');
 
-  // 4. 恢复你最开始的干净主题
-  rendition.themes.default({
-    body: {
-      'background-color': '#000000 !important',
-      'color': '#d4d4d4 !important',
-      'line-height': '1.6 !important', // 核心倍率
-      'margin': '0 !important',
-      'padding': '0 40px !important'
-    },
-    '::selection': {
-      'background': '#333333 !important'
-    }
-  });
- // 5. 🚀 执行渲染：文字出来后再跑分页，防止灰屏 
-    rendition.display(savedCfi || undefined).then(() => {
-      console.log("🪄 文字已加载，后台开始计算分页...");
-      generatePagination(savedCfi);
+    const snapToGrid = (el) => {
+      const lh = currentLineHeightPx.value || 26; 
+      
+      // 优先读取 HTML 原生属性 height，防止图片未加载时高度为 0
+      let rawHeight = parseFloat(el.getAttribute('height')) || el.naturalHeight || el.clientHeight || lh * 10;
+      if (!rawHeight || rawHeight === 0) return;
+
+      // 四舍五入到最近的行高整数倍
+      let snappedHeight = Math.round(rawHeight / lh) * lh;
+      if (snappedHeight < lh) snappedHeight = lh;
+
+      // 使用 cssText 进行霸道覆盖，确保绝对不留一丝死角
+      el.style.cssText = `
+        display: block !important;
+        height: ${snappedHeight}px !important;
+        width: auto !important;
+        max-width: 100% !important;
+        max-height: none !important;
+        margin: 0 auto ${lh}px auto !important; /* 强制图片底部必须是 1 倍行高 */
+        padding: 0 !important;
+        border: none !important;
+        box-sizing: border-box !important;
+        vertical-align: top !important;
+      `;
+    };
+
+    mediaElements.forEach(el => {
+      if (el.tagName.toLowerCase() === 'img') {
+        if (el.complete) snapToGrid(el);
+        else el.onload = () => snapToGrid(el);
+      } else {
+        snapToGrid(el);
+      }
     });
+  });
+// 5. 恢复你最开始的干净主题，并加入段落约束
+  applyTheme();
+ // 6. 🚀 执行渲染：文字出来后再跑分页，防止灰屏 
+  rendition.display(savedCfi || undefined).then(() => {
+    console.log("🪄 文字已加载，后台开始计算分页...");
+    generatePagination(savedCfi);
+  });
 
     // 监听选中事件
-    rendition.on('selected', handleSelection);
+  rendition.on('selected', handleSelection);
+  setupIframeClick();
+};
+
+// ==========================================
+// 最终版安全翻页
+// ==========================================
+const doSafeScroll = (direction) => { 
+  const scrollContainer = rendition.manager.container;
+  if (!scrollContainer) return;
+
+  // 跨章加载检测保持不变
+  const maxScroll = scrollContainer.scrollHeight - scrollContainer.clientHeight;
+  if (direction === 1 && scrollContainer.scrollTop >= maxScroll - 5) {
+    rendition.next(); 
+    return;
+  }
+  if (direction === -1 && scrollContainer.scrollTop <= 5) {
+    rendition.prev(); 
+    return;
+  }
+
+  // 因为我们在 applyTheme 里把容器高度精确锁死了，这里直接获取
+  const jumpStep = scrollContainer.clientHeight;
+
+  // 使用绝对坐标平滑跳转
+  const targetScrollTop = scrollContainer.scrollTop + (direction * jumpStep);
+  scrollContainer.scrollTo({ top: targetScrollTop, left: 0 });
 };
 // ==========================================
 // 2. 交互与布局控制
 // ==========================================
+// 替换原来的 setupIframeClick
 const setupIframeClick = () => {
   rendition.on('click', (e) => {
-    // 弹窗逻辑保持
     if (showTocOverlay.value || showWiki.value) {
       showTocOverlay.value = false;
       showWiki.value = false;
       return;
     }
 
-    const scrollContainer = rendition.manager.container;
-    if (!scrollContainer) return;
-
-    // 100% 高度硬跳
-    const jumpStep = scrollContainer.clientHeight; 
-
     if (e.clientX < window.innerWidth * 0.3) {
-      // 向上跳转，去掉 behavior: 'smooth'
-      scrollContainer.scrollBy({ top: -jumpStep, left: 0 });
+      // 向上/前翻页
+      doSafeScroll(-1);
     } else if (e.clientX > window.innerWidth * 0.7) {
-      // 向下跳转
-      scrollContainer.scrollBy({ top: jumpStep, left: 0 });
+      // 向下/后翻页
+      doSafeScroll(1);
     } else {
       showBars.value = !showBars.value;
     }
   });
 };
-// --- 接管外部控制区域的点击 ---
+
+// 替换原来的 handleTouch
 const handleTouch = (event) => {
   const rect = readerMain.value.getBoundingClientRect();
   const clickX = event.clientX - rect.left;
@@ -222,9 +366,11 @@ const handleTouch = (event) => {
   if (showTocOverlay.value || showWiki.value) return;
 
   if (clickX < width * 0.3) {
-    rendition.prev();
+    // 替换掉原来的 rendition.prev()，使用安全滚动
+    doSafeScroll(-1);
   } else if (clickX > width * 0.7) {
-    rendition.next();
+    // 替换掉原来的 rendition.next()，使用安全滚动
+    doSafeScroll(1);
   } else {
     showBars.value = !showBars.value;
   }
