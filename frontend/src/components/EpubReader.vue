@@ -156,8 +156,9 @@ const applyTheme = () => {
       'background-color': '#000000 !important',
       'color': '#d4d4d4 !important',
       'line-height': `${absoluteLineHeight}px !important`,
-    },
-
+      // 强制锁定统一字体，防止不同书籍自带字体的基线(baseline)偏移导致文字下沉被切
+      'font-family': 'system-ui, -apple-system, sans-serif !important', 
+    },    
     // 核心块级元素：暴力抹杀一切异样！
     // 扩充了捕获范围：figcaption, .caption, .notes 统统拉入网格！
     'p, div, blockquote, ul, ol, li, pre, section, article, figcaption, .caption, .notes': {
