@@ -26,13 +26,15 @@ async def init_db():
         # 2. 📖 皇家藏书阁 (保存书籍元数据)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS books (
-                id TEXT PRIMARY KEY,        -- 文件的 MD5 或 UUID，防止重复上传
+                id TEXT PRIMARY KEY,
                 title TEXT NOT NULL,
                 author TEXT,
-                cover_path TEXT,            -- 封面图提取出来的路径
-                file_path TEXT NOT NULL,    -- 完美的 EPUB 文件路径
-                format TEXT NOT NULL,       -- epub 或 pdf
-                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                cover_path TEXT,
+                file_path TEXT NOT NULL,
+                format TEXT NOT NULL,
+                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                uploader_id INTEGER,         -- ✨ 新增：记录书籍的源头主人
+                is_public BOOLEAN DEFAULT 0  -- ✨ 新增：是否对所有人可见
             )
         """)
 

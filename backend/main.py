@@ -206,18 +206,17 @@ async def get_bookshelf(
     user_token: Optional[str] = Header(None),
     guest_uuid: Optional[str] = Header(None)
 ):
-    """获取当前用户的专属书架 [cite: 4]"""
+    """获取当前用户的专属书架"""
     db_path = "/app/data/library.db"
     books = []
     
     try:
         async with aiosqlite.connect(db_path) as db:
-            # 1. 获取用户 ID
             user_id = await get_current_user_id(db, user_token, guest_uuid)
             
-            # 2. 联合查询用户关联的书籍
+            # ✨ 核心修复：把 uploader_id 和 is_public 一起从数据库里查出来
             cursor = await db.execute("""
-                SELECT b.id, b.title, b.author, b.format, ub.progress_percentage 
+                SELECT b.id, b.title, b.author, b.format, ub.progress_percentage, b.uploader_id, b.is_public 
                 FROM books b 
                 INNER JOIN user_books ub ON b.id = ub.book_id 
                 WHERE ub.user_id = ? 
@@ -232,10 +231,11 @@ async def get_bookshelf(
                     "author": row[2] or "佚名",
                     "format": row[3],
                     "progress": row[4],
+                    "is_uploader": row[5] == user_id,  # ✨ 告诉前端：这本书是不是我传的
+                    "is_public": bool(row[6]),         # ✨ 告诉前端：这本书现在的状态
                     "is_owned": True
                 })
         
-        # 🌟 这里的 return 必须和上方的 async with 垂直对齐（8个空格）
         return {"status": "success", "books": books, "layout": "grid"}
         
     except Exception as e:
@@ -278,16 +278,22 @@ async def upload_magic_book(
     # 2. 写入数据库！
     db_path = "/app/data/library.db"
     async with aiosqlite.connect(db_path) as db:
-        # 第一步：先往藏书阁（books）存入书籍基本信息 [cite: 5]
+        # 第一步：获取当前用户的 ID 和身份
+        user_id = await get_current_user_id(db, user_token, guest_uuid)
+        cursor = await db.execute("SELECT is_guest FROM users WHERE id = ?", (user_id,))
+        user_info = await cursor.fetchone()
+        is_guest = user_info[0] if user_info else 1
+        
+        # 匿名游客默认 public(1)，注册用户默认 private(0)
+        is_public = 1 if is_guest else 0
+
+        # 第二步：存入书籍基本信息（加上 uploader_id 和 is_public）
         await db.execute(
-            "INSERT INTO books (id, title, file_path, format) VALUES (?, ?, ?, ?)",
-            (book_id, title, save_path, format_type)
+            "INSERT INTO books (id, title, file_path, format, uploader_id, is_public) VALUES (?, ?, ?, ?, ?, ?)",
+            (book_id, title, save_path, format_type, user_id, is_public)
         )
         
-        # 第二步：获取当前用户的 ID (无论是正式用户还是幽灵游客) 
-        user_id = await get_current_user_id(db, user_token, guest_uuid)
-        
-        # 第三步：在灵魂羁绊表（user_books）中建立关联 [cite: 5]
+        # 第三步：在灵魂羁绊表中建立关联
         await db.execute(
             "INSERT INTO user_books (user_id, book_id) VALUES (?, ?)",
             (user_id, book_id)
@@ -314,35 +320,121 @@ async def delete_book(
     db_path = "/app/data/library.db"
     
     try:
+        # ✨ 关键修复：必须先把 db 连接建立好，包裹在 async with 里面！
         async with aiosqlite.connect(db_path) as db:
-            # 1. 验证身份，获取对应的 user_id
+            # 现在 db 已经存在了，调用身份识别就不会报错了
             user_id = await get_current_user_id(db, user_token, guest_uuid)
 
-            # 2. 在删除记录前，先查出文件的物理路径
-            cursor = await db.execute("SELECT file_path FROM books WHERE id = ?", (book_id,))
+            # 查出文件的物理路径和上传者 ID
+            cursor = await db.execute("SELECT file_path, uploader_id FROM books WHERE id = ?", (book_id,))
             book_record = await cursor.fetchone()
 
-            if book_record:
-                file_path = book_record[0]
-                # 3. 物理删除文件 (使用 os.path.exists 增加安全判定，防止文件不存在导致报错)
+            if not book_record:
+                raise HTTPException(status_code=404, detail="书籍似乎已经不存在了")
+
+            file_path, uploader_id = book_record
+
+            # 判断权限：是彻底删除，还是仅仅移出书架
+            if user_id == uploader_id:
+                # 是上传者，彻底物理销毁
                 if file_path and os.path.exists(file_path):
                     os.remove(file_path)
-                    print(f"🗑️ 物理文件已粉碎: {file_path}")
-
-            # 4. 解除灵魂羁绊：从 user_books 表中删除用户的阅读记录和关联
-            await db.execute("DELETE FROM user_books WHERE user_id = ? AND book_id = ?", (user_id, book_id))
-            
-            # 5. 摧毁本体：从 books 表中彻底删除书籍信息
-            await db.execute("DELETE FROM books WHERE id = ?", (book_id,))
+                await db.execute("DELETE FROM user_books WHERE book_id = ?", (book_id,))
+                await db.execute("DELETE FROM books WHERE id = ?", (book_id,))
+                msg = "该书籍已从宇宙中彻底抹除！"
+            else:
+                # 只是白嫖的看客，仅从自己书架移除
+                await db.execute("DELETE FROM user_books WHERE user_id = ? AND book_id = ?", (user_id, book_id))
+                msg = "书籍已从您的书架移除，但源文件仍保留在城堡中。"
 
             # 统一提交魔法契约
             await db.commit()
 
-        return {"status": "success", "message": "该书籍已从宇宙中彻底抹除！"}
+        return {"status": "success", "message": msg}
         
     except Exception as e:
         print(f"💥 删除魔法失败: {e}")
-        raise HTTPException(status_code=500, detail="删除失败，残余魔法能量干扰！")
+        raise HTTPException(status_code=500, detail=str(e))
+# 🔍 搜索全库（你的书 + 别人的公开书）
+@app.get("/api/books/search")
+async def search_books(
+    q: str,
+    user_token: Optional[str] = Header(None),
+    guest_uuid: Optional[str] = Header(None)
+):
+    from database import DB_PATH
+    async with aiosqlite.connect(DB_PATH) as db:
+        user_id = await get_current_user_id(db, user_token, guest_uuid)
+        search_term = f"%{q}%"
+        
+        # 魔法 SQL：选出书名/作者匹配的，并且（是你自己的 OR 它是公开的）
+        query = """
+            SELECT b.id, b.title, b.author, b.format, ub.progress_percentage, b.is_public, b.uploader_id,
+                   CASE WHEN ub.user_id IS NOT NULL THEN 1 ELSE 0 END as is_owned
+            FROM books b
+            LEFT JOIN user_books ub ON b.id = ub.book_id AND ub.user_id = ?
+            WHERE (b.title LIKE ? OR b.author LIKE ?)
+            AND (ub.user_id IS NOT NULL OR b.is_public = 1)
+        """
+        cursor = await db.execute(query, (user_id, search_term, search_term))
+        rows = await cursor.fetchall()
+        
+        books = []
+        for row in rows:
+            books.append({
+                "id": row[0], "title": row[1], "author": row[2] or "佚名",
+                "format": row[3], "progress": row[4] or 0,
+                "is_public": bool(row[5]),
+                "is_uploader": row[6] == user_id,
+                "is_owned": bool(row[7])
+            })
+        return {"status": "success", "books": books}
+
+# ➕ 白嫖公开书籍（加入自己书架）
+@app.post("/api/books/{book_id}/add_to_shelf")
+async def add_public_book(
+    book_id: str,
+    user_token: Optional[str] = Header(None),
+    guest_uuid: Optional[str] = Header(None)
+):
+    from database import DB_PATH
+    async with aiosqlite.connect(DB_PATH) as db:
+        user_id = await get_current_user_id(db, user_token, guest_uuid)
+        await db.execute("INSERT OR IGNORE INTO user_books (user_id, book_id) VALUES (?, ?)", (user_id, book_id))
+        await db.commit()
+    return {"status": "success", "message": "已成功偷取...啊不，借阅到您的书架！"}
+
+# 👁️ 切换公开/私有状态
+@app.put("/api/books/{book_id}/toggle_visibility")
+async def toggle_visibility(
+    book_id: str,
+    user_token: Optional[str] = Header(None),
+    guest_uuid: Optional[str] = Header(None)
+):
+    from database import DB_PATH
+    async with aiosqlite.connect(DB_PATH) as db:
+        user_id = await get_current_user_id(db, user_token, guest_uuid)
+        
+        # 先确认是不是上传者
+        cursor = await db.execute("SELECT is_public FROM books WHERE id = ? AND uploader_id = ?", (book_id, user_id))
+        record = await cursor.fetchone()
+        if not record:
+            raise HTTPException(status_code=403, detail="只有书籍的初始上传者才能修改可见性哦！")
+        
+        new_status = 0 if record[0] else 1
+        await db.execute("UPDATE books SET is_public = ? WHERE id = ?", (new_status, book_id))
+        
+        # ✨ 核心修复：如果变成私有 (0)，直接抹除其他所有人的书架关联记录！
+        if new_status == 0:
+            await db.execute(
+                "DELETE FROM user_books WHERE book_id = ? AND user_id != ?", 
+                (book_id, user_id)
+            )
+
+        await db.commit()
+        return {"status": "success", "is_public": new_status}
+
+
 # -----------------------------------------------------------------
 # 📖 沉浸式阅读小工具 (字典 & 维基反代)
 # -----------------------------------------------------------------
