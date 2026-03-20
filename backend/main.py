@@ -128,17 +128,39 @@ async def save_progress(
     user_token: Optional[str] = Header(None), 
     guest_uuid: Optional[str] = Header(None)
 ):
-    from database import update_reading_progress, DB_PATH
+    from database import DB_PATH
     
-    # 🕵️‍♂️ 识别身份
     async with aiosqlite.connect(DB_PATH) as db:
+        # 1. 识别当前发来请求的究竟是谁（此时可能是被别的标签页修改后的新账号）
         user_id = await get_current_user_id(db, user_token, guest_uuid)
-    
-    cfi = payload.get("cfi")
-    percent = payload.get("percent", 0)
-    
-    # 将识别出的真实 user_id 传给数据库操作函数
-    await update_reading_progress(user_id, book_id, cfi, percent)
+        
+        # 🛡️ 2. 核心修复：灵魂绑定锁！检查当前用户是否真的拥有这本书！
+        cursor = await db.execute(
+            "SELECT 1 FROM user_books WHERE user_id = ? AND book_id = ?", 
+            (user_id, book_id)
+        )
+        is_owner = await cursor.fetchone()
+        
+        if not is_owner:
+            # 🚨 如果当前账号没有这本书（说明发生了串号），绝对不能静默转移书籍！直接拒绝！
+            # 这样就不会把【账号1】的书强行塞给【账号2】了
+            raise HTTPException(status_code=403, detail="账号状态已变更，拒绝越权保存进度！")
+
+        # 3. 如果校验通过，提取进度
+        cfi = payload.get("cfi")
+        percent = payload.get("percent", 0)
+        
+        # 🔒 4. 绝对安全的更新逻辑：严格限定只更新当前 user_id 和 book_id 的记录
+        await db.execute(
+            """
+            UPDATE user_books 
+            SET current_cfi = ?, progress_percentage = ?
+            WHERE user_id = ? AND book_id = ?
+            """,
+            (cfi, percent, user_id, book_id)
+        )
+        await db.commit()
+        
     return {"status": "success"}
 # -----------------------------------------------------------------
 # 📚 书架与图书管理模块 (你的灵魂安放之处)
