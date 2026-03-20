@@ -5,22 +5,33 @@
       
       <header class="flex flex-col md:flex-row items-center justify-between py-12 gap-6 relative">
         
-        <div class="flex-1 hidden md:block"></div>
+        <div class="flex-1 flex justify-start">
+          <button 
+            v-if="activeTab !== 'bookshelf'" 
+            @click="resetToHome"
+            class="flex items-center gap-2 text-[10px] md:text-xs font-bold tracking-[0.2em] text-neutral-500 hover:text-neutral-100 transition-colors duration-300"
+          >
+            <span class="text-lg">‹</span> BACK
+          </button>
+        </div>
         
-        <h1 class="text-2xl md:text-4xl font-light tracking-[0.5em] text-center flex-1 text-neutral-100">
+        <h1 
+          @click="resetToHome"
+          class="text-2xl md:text-4xl font-light tracking-[0.5em] text-center flex-1 text-neutral-100 cursor-pointer hover:text-white transition-colors duration-300"
+        >
           S U L I B R A R Y
         </h1>
         
         <div class="flex-1 flex justify-end items-center gap-4 w-full md:w-auto">
           <button
             @click="toggleTab"
-            class="text-[10px] md:text-xs font-bold tracking-[0.2em] text-neutral-500 hover:text-neutral-100 transition-colors duration-300 whitespace-nowrap"
+            class="text-[10px] md:text-xs font-bold tracking-[0.2em] text-neutral-500 hover:text-neutral-100 transition-colors duration-300 whitespace-nowrap uppercase"
           >
-            {{ activeTab === 'bookshelf' ? 'BOOKSTORE' : 'BOOKSHELF' }}
+            {{ activeTab === 'bookstore' ? 'BOOKSHELF' : 'BOOKSTORE' }}
           </button>
 
           <input
-            v-show="activeTab === 'bookshelf'"
+            v-show="activeTab !== 'bookstore'"
             v-model="searchQuery"
             @keyup.enter="executeCommand"
             type="text"
@@ -35,9 +46,19 @@
           v-show="activeTab === 'bookshelf'"
           :books="bookshelf"
           @openReader="openReader"
+          @refreshBookshelf="fetchBookshelf"
         />
+
         <BookstoreView
           v-show="activeTab === 'bookstore'"
+        />
+
+        <SearchView
+          v-show="activeTab === 'search'"
+          :results="searchResults"
+          @openReader="openReader"
+          @refreshSearch="executeCommand"
+          @refreshBookshelf="fetchBookshelf"
         />
       </main>
     </div>
@@ -50,31 +71,32 @@
 
   </div>
 </template>
-
 <script setup>
-import { ref, onMounted } from 'vue';
+import { ref, onMounted,watch } from 'vue';
 import { v4 as uuidv4 } from 'uuid';
 
 import EpubReader from './components/EpubReader.vue';
 import BookshelfView from './views/BookshelfView.vue';
 import BookstoreView from './views/BookstoreView.vue';
+import SearchView from './views/SearchView.vue';
 
 const activeTab = ref('bookshelf'); 
 const currentReadingBook = ref(null);
 const bookshelf = ref([]);
+const searchResults = ref([]);
 const isGuest = ref(true);
-
-// 搜索框数据绑定
 const searchQuery = ref('');
 
-const toggleTab = () => {
-  activeTab.value = activeTab.value === 'bookshelf' ? 'bookstore' : 'bookshelf';
-};
 
-onMounted(() => {
-  checkIdentity();
-  fetchBookshelf();
-});
+const toggleTab = () => {
+  if (activeTab.value === 'bookstore') {
+    activeTab.value = 'bookshelf';
+    fetchBookshelf(); // 回到书架时，顺便刷新一下最新数据
+  } else {
+    // 无论当前是 bookshelf 还是 search 状态，只要点这个按钮，就去 bookstore
+    activeTab.value = 'bookstore';
+  }
+};
 
 const checkIdentity = () => {
   const token = localStorage.getItem('geek_token');
@@ -133,7 +155,35 @@ const executeCommand = async () => { // 加上 async
     return;
   }
   // ... 其他搜索逻辑
+  try {
+    const response = await fetch(`/api/books/search?q=${encodeURIComponent(query)}`, {
+      headers: {
+        'user-token': localStorage.getItem('geek_token') || '',
+        'guest-uuid': localStorage.getItem('guest_uuid') || ''
+      }
+    });
+    const data = await response.json();
+    if (data.status === 'success') {
+      searchResults.value = data.books; 
+      activeTab.value = 'search'; // ✨ 自动切换到搜索视图！
+    }
+  } catch (error) {
+    console.error('💥 搜索魔法阵失效:', error);
+  }
 };
+// ✨ 核心修复：增加返回主页的逻辑
+const resetToHome = () => {
+  activeTab.value = 'bookshelf';  // 强制切回书架状态
+  searchQuery.value = '';         // 清空搜索框里的文字
+  fetchBookshelf();               // 重新向后端请求最新书架数据
+};
+// ✨ 当搜索框被清空时，自动切回书架
+watch(searchQuery, (newVal) => {
+  if (newVal === '') {
+    activeTab.value = 'bookshelf';
+    searchResults.value = []; // 清空之前的搜索缓存
+  }
+});
 
 const API_BASE = 'http://127.0.0.1:8000'; // 替换成你树莓派的实际 IP 和端口
 

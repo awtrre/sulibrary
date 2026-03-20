@@ -47,6 +47,16 @@
       <div class="bg-[#111] border border-[#333] p-8 flex flex-col gap-4 shadow-2xl min-w-[280px]">
         <h3 class="text-neutral-400 text-xs tracking-widest uppercase mb-4 text-center border-b border-[#333] pb-4">Options</h3>
         <button @click="showBookDetails" class="px-6 py-3 bg-[#222] hover:bg-[#333] text-sm tracking-widest transition-colors">DETAILS</button>
+        <button 
+          v-if="selectedBook && selectedBook.is_uploader" 
+          @click.stop="handleToggleVisibility" 
+          class="px-6 py-3 text-sm tracking-widest transition-colors text-center"
+          :class="selectedBook.is_public 
+            ? 'bg-neutral-200 hover:bg-white text-black font-bold' 
+            : 'bg-[#222] hover:bg-[#333] text-neutral-200 font-normal'"
+        >
+          {{ selectedBook.is_public ? 'PUBLIC' : 'PRIVATE' }}
+        </button>
         <button @click="deleteBook" class="px-6 py-3 bg-neutral-200 hover:bg-white text-black text-sm tracking-widest transition-colors font-bold">DELETE</button>
         <button @click="showActionMenu = false" class="px-6 py-3 mt-2 text-neutral-500 hover:text-white text-xs tracking-widest transition-colors">CANCEL</button>
       </div>
@@ -181,3 +191,35 @@ const deleteBook = async () => {
   }
 };
 </script>
+
+const handleToggleVisibility = async () => {
+  if (!selectedBook.value) return;
+  
+  console.log(`[可见性切换] 正在处理书籍: ${selectedBook.value.title}`);
+
+  try {
+    const response = await fetch(`/api/books/${selectedBook.value.id}/toggle_visibility`, {
+      method: 'PUT',
+      headers: {
+        'user-token': localStorage.getItem('geek_token') || '',
+        'guest-uuid': localStorage.getItem('guest_uuid') || ''
+      }
+    });
+    
+    const data = await response.json();
+    
+    if (data.status === 'success') {
+      // 🌟 核心修复：强制转换为 Boolean，触发 Vue 响应式 UI 变更！
+      selectedBook.value.is_public = !!data.is_public; 
+      console.log(`✨ 状态已切换为: ${selectedBook.value.is_public ? 'PUBLIC' : 'PRIVATE'}`);
+      
+      // 通知外层 App.vue 重新拉取一次书架，保证绝对的后台同步
+      emit('refreshBookshelf'); 
+    } else {
+      console.error('💥 权限不足或魔法中断:', data.detail);
+      alert(data.detail);
+    }
+  } catch (error) {
+    console.error('💥 网络请求失败:', error);
+  }
+};
