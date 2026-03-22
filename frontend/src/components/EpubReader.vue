@@ -3,7 +3,7 @@
     
     <div class="relative h-full flex-grow border-r border-neutral-800 bg-black flex items-center justify-center overflow-hidden" ref="readerMain">
       
-      <div id="viewer" ref="viewer" class="w-full" :style="{ height: exactViewerHeight }"></div>
+      <div id="viewer" ref="viewer" class="w-full h-full"></div>
       
       <div class="absolute inset-0 grid grid-cols-[30%_40%_30%] z-10" @click="handleTouch">
         <div class="cursor-pointer"></div>
@@ -91,7 +91,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted,nextTick } from 'vue';
+import { ref, onMounted, onUnmounted } from 'vue';
 import ePub from 'epubjs';
 
 const props = defineProps({
@@ -111,7 +111,7 @@ const ttsPlayer = ref(null);
 // --- 核心实例 ---
 let epubBook = null;
 let rendition = null;
-const backendApi = '/api'; // 指向 Nginx 的后端代理
+const backendApi = '/api';
 
 // --- 界面控制状态 ---
 const showBars = ref(false);
@@ -126,107 +126,59 @@ const currentPage = ref(1);
 const totalPages = ref('???');
 const inputPage = ref('1');
 const currentFontSize = ref(100);
-const currentLineHeightPx = ref(26); // 默认给个整数
-const exactViewerHeight = ref('100dvh');
 
 // --- TTS 引擎状态 ---
 const isReading = ref(false);
 let currentSpineIndex = 0;
 let textNodes = [];
 let currentNodeIndex = 0;
+
 // ==========================================
-// 终极版主题注入：绝对网格对齐
+// 主题注入：适配 Paginated 模式的流式布局
 // ==========================================
 const applyTheme = () => {
   if (!rendition) return;
   
-  // 算出绝对的整数行高
-  const baseSize = 16 * (currentFontSize.value / 100);
-  const absoluteLineHeight = Math.floor(baseSize * 1.6);
-  currentLineHeightPx.value = absoluteLineHeight;
-
-  // 锁定容器完美高度
-  const screenHeight = window.innerHeight; 
-  const maxLines = Math.floor(screenHeight / absoluteLineHeight);
-  exactViewerHeight.value = `${maxLines * absoluteLineHeight}px`;
-
+  // 在 paginated 模式下，过度锁定 margin 和 line-height 会导致文字被切断
+  // 所以这里我们只注入核心的颜色、字体和基础间距，让 Epub.js 的 column 机制自然流动
   rendition.themes.default({
-    // 基础内联元素
-    'body, span, a, b, i, em, strong': {
+    'body, p, span, a, b, i, em, strong, div, blockquote, ul, ol, li, section, article': {
       'background-color': '#000000 !important',
       'color': '#d4d4d4 !important',
-      'line-height': `${absoluteLineHeight}px !important`,
-      // 强制锁定统一字体，防止不同书籍自带字体的基线(baseline)偏移导致文字下沉被切
       'font-family': 'system-ui, -apple-system, sans-serif !important', 
+      'line-height': '1.6 !important',
     },    
-    // 核心块级元素：暴力抹杀一切异样！
-    // 扩充了捕获范围：figcaption, .caption, .notes 统统拉入网格！
-    'p, div, blockquote, ul, ol, li, pre, section, article, figcaption, .caption, .notes': {
-      'line-height': `${absoluteLineHeight}px !important`,
+    'p': {
       'margin-top': '0 !important', 
-      'margin-bottom': `${absoluteLineHeight}px !important`, // 段后距完美 1 倍行高
-      'padding': '0 !important' // 严禁内边距撑开！
+      'margin-bottom': '1em !important',
+      'text-indent': '2em !important' // 传统段首缩进
     },
-
-    // ==========================================
-    // 新增：角标【1】的绝杀中和方案 (解决 vertical-align 导致的行高增加)
-    // ==========================================
-    'sup, sub': {
-      // 1. 强制行高为 0！这样它绝不会增加父级行框的高度。
-      'line-height': '0 !important', 
-      // 2. 核心！将垂直对齐设为基线，废除浏览器的 super 抬高效果。
-      'vertical-align': 'baseline !important', 
-      // 3. 准备进行手工微调位置，不影响父级高度计算。
-      'position': 'relative !important', 
-      // 4. 标准的角标小字号。
-      'font-size': '75% !important' 
-    },
-    'sup': {
-      // 5. 手工微调：向上移动 0.5em，视觉上看起来是角标，但物理高度依然在 26px 网格内！
-      'top': '-0.5em !important' 
-    },
-    'sub': {
-      // 下标向下移动。
-      'bottom': '-0.25em !important' 
-    },
-    // ==========================================
-
-    // 标题
     'h1, h2, h3, h4, h5, h6': {
-      'line-height': `${absoluteLineHeight * 2}px !important`,
-      'margin-top': `${absoluteLineHeight}px !important`,
-      'margin-bottom': `${absoluteLineHeight}px !important`,
-      'padding': '0 !important'
+      'color': '#ffffff !important',
+      'line-height': '1.4 !important',
+      'margin-top': '1.5em !important',
+      'margin-bottom': '1em !important',
     },
-
-    // 图片与多媒体
     'img, svg, video': {
       'display': 'block !important', 
-      'vertical-align': 'top !important',
-      'margin': `0 auto ${absoluteLineHeight}px auto !important`, 
-      'padding': '0 !important',
-      'border': 'none !important',
-      'max-width': '100% !important'
+      'margin': '1em auto !important', 
+      'max-width': '100% !important',
+      'max-height': '80vh !important' // 防止图片过高撑破单页
     },
-    'figure, .image-wrap, .fig': {
-      'margin': '0 !important', 
-      'padding': '0 !important',
-      'line-height': '0 !important' 
+    'sup, sub': {
+      'line-height': '0 !important', 
+      'vertical-align': 'baseline !important', 
+      'position': 'relative !important', 
+      'font-size': '75% !important' 
     },
-
-    // 分割线 hr
-    'hr': {
-      'margin': `${absoluteLineHeight}px 0 !important`,
-      'height': '1px !important',
-      'border': 'none !important',
-      'background-color': '#333333 !important'
-    },
-
+    'sup': { 'top': '-0.5em !important' },
+    'sub': { 'bottom': '-0.25em !important' },
     '::selection': {
       'background': '#333333 !important'
     }
   });
 };
+
 // ==========================================
 // 1. 生命周期与初始化
 // ==========================================
@@ -239,13 +191,11 @@ onUnmounted(() => {
     epubBook.destroy();
   }
 });
- 
+
 const initReader = async () => {
-  // 【优化 1：并行初始化】
-  // 提前触发 ePub 实例加载，不要等 API 进度接口拉完再开始请求 EPUB 文件
   epubBook = ePub(`/api/static/books/${props.book.id}.epub`);
 
-  // 同时获取用户阅读进度
+  // 获取进度
   const res = await fetch(`/api/books/${props.book.id}/progress`, {
     headers: {
       'user-token': localStorage.getItem('geek_token') || '',
@@ -255,100 +205,30 @@ const initReader = async () => {
   const data = await res.json();
   const savedCfi = data.cfi;
 
-  // 恢复滚动模式
+  // 核心变更：开启 paginated 模式
   rendition = epubBook.renderTo(viewer.value, {
     width: '100%',
     height: '100%',
-    flow: 'scrolled-doc',
-    manager: 'continuous'
-  });
-
-  // 注册 Hook，劫持图片 (保持你的原逻辑不变)
-  rendition.hooks.content.register((contents) => {
-    const doc = contents.document;
-    const mediaElements = doc.querySelectorAll('img, svg, video');
-
-    const snapToGrid = (el) => {
-      const lh = currentLineHeightPx.value || 26; 
-      let rawHeight = parseFloat(el.getAttribute('height')) || el.naturalHeight || el.clientHeight || lh * 10;
-      if (!rawHeight || rawHeight === 0) return;
-
-      let snappedHeight = Math.round(rawHeight / lh) * lh;
-      if (snappedHeight < lh) snappedHeight = lh;
-
-      el.style.cssText = `
-        display: block !important;
-        height: ${snappedHeight}px !important;
-        width: auto !important;
-        max-width: 100% !important;
-        max-height: none !important;
-        margin: 0 auto ${lh}px auto !important;
-        padding: 0 !important;
-        border: none !important;
-        box-sizing: border-box !important;
-        vertical-align: top !important;
-      `;
-    };
-
-    mediaElements.forEach(el => {
-      if (el.tagName.toLowerCase() === 'img') {
-        if (el.complete) snapToGrid(el);
-        else el.onload = () => snapToGrid(el);
-      } else {
-        snapToGrid(el);
-      }
-    });
+    flow: 'paginated', // 启用仿真翻页
+    manager: 'default',
+    spread: 'none' // 强制单页显示，防止在宽屏(如iPad竖屏)下出现尴尬的双页模式
   });
 
   applyTheme();
 
-  // 🚀 执行渲染
   rendition.display(savedCfi || undefined).then(() => {
-    console.log("🪄 文字DOM已就绪，准备渲染...");
-    
-    // 【优化 2：宏任务让渡 (核心修复)】
-    // 使用 setTimeout 将耗时的分页计算变成宏任务 (Macrotask)。
-    // 这强制要求 JavaScript 引擎先挂起代码执行，让浏览器把 iframe 里的文字先画到屏幕上。
-    setTimeout(() => {
-      console.log("⏳ 画面已渲染，后台开始计算分页...");
-      generatePagination(savedCfi);
-    }, 150); // 留出 150ms 的缓冲时间给浏览器完成绘制
+    // 渲染完成后计算总页数
+    generatePagination(savedCfi);
   });
 
-  // 监听选中事件
   rendition.on('selected', handleSelection);
   setupIframeClick();
 };
 
 // ==========================================
-// 最终版安全翻页
+// 2. 交互与布局控制 (极致简化版)
 // ==========================================
-const doSafeScroll = (direction) => { 
-  const scrollContainer = rendition.manager.container;
-  if (!scrollContainer) return;
-
-  // 跨章加载检测保持不变
-  const maxScroll = scrollContainer.scrollHeight - scrollContainer.clientHeight;
-  if (direction === 1 && scrollContainer.scrollTop >= maxScroll - 5) {
-    rendition.next(); 
-    return;
-  }
-  if (direction === -1 && scrollContainer.scrollTop <= 5) {
-    rendition.prev(); 
-    return;
-  }
-
-  // 因为我们在 applyTheme 里把容器高度精确锁死了，这里直接获取
-  const jumpStep = scrollContainer.clientHeight;
-
-  // 使用绝对坐标平滑跳转
-  const targetScrollTop = scrollContainer.scrollTop + (direction * jumpStep);
-  scrollContainer.scrollTo({ top: targetScrollTop, left: 0 });
-};
-// ==========================================
-// 2. 交互与布局控制
-// ==========================================
-// 替换原来的 setupIframeClick
+// iframe 内部点击监听
 const setupIframeClick = () => {
   rendition.on('click', (e) => {
     if (showTocOverlay.value || showWiki.value) {
@@ -356,20 +236,18 @@ const setupIframeClick = () => {
       showWiki.value = false;
       return;
     }
-
-    if (e.clientX < window.innerWidth * 0.3) {
-      // 向上/前翻页
-      doSafeScroll(-1);
-    } else if (e.clientX > window.innerWidth * 0.7) {
-      // 向下/后翻页
-      doSafeScroll(1);
+    const width = window.innerWidth;
+    if (e.clientX < width * 0.3) {
+      rendition.prev(); // 原生上一页
+    } else if (e.clientX > width * 0.7) {
+      rendition.next(); // 原生下一页
     } else {
       showBars.value = !showBars.value;
     }
   });
 };
 
-// 替换原来的 handleTouch
+// 外层触控蒙版监听
 const handleTouch = (event) => {
   const rect = readerMain.value.getBoundingClientRect();
   const clickX = event.clientX - rect.left;
@@ -378,19 +256,17 @@ const handleTouch = (event) => {
   if (showTocOverlay.value || showWiki.value) return;
 
   if (clickX < width * 0.3) {
-    // 替换掉原来的 rendition.prev()，使用安全滚动
-    doSafeScroll(-1);
+    rendition.prev();
   } else if (clickX > width * 0.7) {
-    // 替换掉原来的 rendition.next()，使用安全滚动
-    doSafeScroll(1);
+    rendition.next();
   } else {
     showBars.value = !showBars.value;
   }
 };
+
 const openTocOverlay = () => {
   showBars.value = false;
   showTocOverlay.value = true;
-  // 获取书籍目录
   epubBook.loaded.navigation.then(nav => {
     tocList.value = nav.toc;
   });
@@ -408,34 +284,28 @@ const handleSelection = (cfiRange, contents) => {
   const text = rendition.getRange(cfiRange).toString();
   if (!text) return;
   
-  // 添加极简灰色高亮
   rendition.annotations.add('highlight', cfiRange, {}, null, 'gray');
-  // 清除浏览器默认的蓝色选中背景
   contents.window.getSelection().removeAllRanges();
-  
   summonReference(text);
 };
 
 const summonReference = async (query) => {
   showWiki.value = true;
-  wikiContent.value = '<p class="text-neutral-500 font-mono text-center mt-10">⏳ Connecting to external portal...</p>';
+  wikiContent.value = '<p class="text-neutral-500 font-mono text-center mt-10">⏳ Connecting to portal...</p>';
   
-  // 模拟请求后端的 SOCKS5 代理接口
   setTimeout(() => {
     wikiContent.value = `
       <h1 class="text-2xl text-neutral-100 mb-4">${query}</h1>
       <p class="text-neutral-300 leading-relaxed">
-        这是从后端反代服务器拉取的 <strong>${query}</strong> 的解释。
-        极简主题 CSS 已自动应用，与整体禁欲系风格保持一致。
+        这是从后端拉取的 <strong>${query}</strong> 的解释。
       </p>
     `;
   }, 800);
 };
 
 // ==========================================
-// 4. 分页与排版 (计算虚拟页码 - 原始版)
+// 4. 分页与排版
 // ==========================================
-// 增加一个防抖计时器，避免滚动太快把数据库点爆
 let saveTimer = null;
 
 const saveProgressToBackend = (cfi, progress) => {
@@ -445,13 +315,10 @@ const saveProgressToBackend = (cfi, progress) => {
       method: 'POST',
       headers: { 
         'Content-Type': 'application/json',
-        'user-token': localStorage.getItem('geek_token') || '', // 注入身份 [cite: 4]
+        'user-token': localStorage.getItem('geek_token') || '',
         'guest-uuid': localStorage.getItem('guest_uuid') || ''
       },
-      body: JSON.stringify({ 
-        cfi: cfi, 
-        percentage: progress 
-      })
+      body: JSON.stringify({ cfi: cfi, percentage: progress })
     });
   }, 2000); 
 };
@@ -459,12 +326,9 @@ const saveProgressToBackend = (cfi, progress) => {
 const generatePagination = async (savedCfi) => {
   if (!epubBook) return;
 
-  // 1. 后台开始生成虚拟页码 (不阻塞主界面)
   await epubBook.locations.generate(600);
   totalPages.value = epubBook.locations.total;
 
-  // 2. 计算完成后，强制校准一次当前页码
-  // 如果没有 savedCfi，就拿当前正在显示的位置算
   const currentCfi = savedCfi || (rendition.currentLocation()?.start?.cfi);
   if (currentCfi) {
     const progress = epubBook.locations.percentageFromCfi(currentCfi);
@@ -472,16 +336,13 @@ const generatePagination = async (savedCfi) => {
     inputPage.value = currentPage.value;
   }
 
-  // 3. 监听位置变动 (每次滚动结束都会触发)
   rendition.on('relocated', (location) => {
     const cfi = location.start.cfi;
     const progress = epubBook.locations.percentageFromCfi(cfi);
     
-    // 更新本地页码显示状态
     currentPage.value = Math.round(progress * totalPages.value) || 1;
     inputPage.value = currentPage.value;
 
-    // 核心：调用防抖存盘函数，把位置记在服务器的 library.db 里 [cite: 5]
     saveProgressToBackend(cfi, progress);
   });
 };
@@ -502,7 +363,6 @@ const cycleFontSize = () => {
   currentFontSize.value = sizes[(currentIndex + 1) % sizes.length];
   rendition.themes.fontSize(`${currentFontSize.value}%`);
   
-  // ✨ 新增：同步保存字号到后端用户偏好 (layout_prefs) [cite: 5]
   fetch('/api/user/prefs', {
     method: 'POST',
     headers: { 
@@ -515,7 +375,7 @@ const cycleFontSize = () => {
 };
 
 // ==========================================
-// 5. TTS 赛博播音员 (无缝分句与跨章)
+// 5. TTS 赛博播音员
 // ==========================================
 const toggleTTS = async () => {
   if (isReading.value) {
@@ -537,7 +397,6 @@ const extractAndPrepareText = async () => {
   await spineItem.load(epubBook.load.bind(epubBook));
   const chapterText = spineItem.document.body.textContent || spineItem.document.body.innerText;
   
-  // 极简分句法：按标点符号切分句子，避免单次音频流过长
   textNodes = chapterText
     .replace(/\s+/g, ' ')
     .split(/(?<=[。！？!?])/)
@@ -553,19 +412,16 @@ const playNextSentence = () => {
 
   if (currentNodeIndex < textNodes.length) {
     const textToRead = textNodes[currentNodeIndex];
-    // 调用后端 TTS 接口流式合成语音
     const ttsApiUrl = `${backendApi}/tts/synthesize`;
     ttsPlayer.value.src = `${ttsApiUrl}?text=${encodeURIComponent(textToRead)}&voice=zh_CN-huayan-medium`;
     ttsPlayer.value.play();
     currentNodeIndex++;
   } else {
-    // 当前章节读完，触发跃迁前往下一章
     jumpToNextChapter();
   }
 };
 
 const handleAudioEnded = () => {
-  // 一句播完，无缝衔接下一句
   playNextSentence();
 };
 
@@ -577,23 +433,22 @@ const handleAudioError = (e) => {
 const jumpToNextChapter = async () => {
   currentSpineIndex++;
   if (currentSpineIndex >= epubBook.spine.length) {
-    isReading.value = false; // 全书终
+    isReading.value = false;
     return;
   }
-  // 视觉上也同步翻到下一章
   await rendition.display(epubBook.spine.get(currentSpineIndex).href);
   await extractAndPrepareText();
 };
 </script>
 
 <style scoped>
-/* 确保 viewer 占满屏幕即可 */
 #viewer {
   width: 100%;
-  /* 修复 1：使用 dvh 获取真实的移动端可视高度，保留 vh 作为旧设备兜底 */
   height: 100dvh; 
+  /* 禁止文本跨列被截断 */
+  column-fill: auto;
 }
-/* 极简淡入动画 */
+
 .animate-fade-in {
   animation: fadeIn 0.2s ease-out forwards;
 }
@@ -602,7 +457,6 @@ const jumpToNextChapter = async () => {
   to { opacity: 1; }
 }
 
-/* 隐藏滚动条 */
 .scrollbar-hide::-webkit-scrollbar {
   display: none;
 }
@@ -611,7 +465,6 @@ const jumpToNextChapter = async () => {
   scrollbar-width: none;
 }
 
-/* 覆盖维基百科返回内容的样式，使其符合深色主题 */
 .wiki-content :deep(a) { 
   color: #a3a3a3; 
   text-decoration: underline; 
