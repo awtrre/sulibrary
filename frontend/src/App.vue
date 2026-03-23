@@ -1,5 +1,5 @@
 <template>
-  <div class="min-h-screen bg-[#111111] text-neutral-200 font-sans selection:bg-neutral-600 selection:text-white">
+  <div class="h-screen overflow-y-auto bg-[#111111] text-neutral-200 font-sans selection:bg-neutral-600 selection:text-white">
     
     <div v-show="!currentReadingBook" class="max-w-6xl mx-auto px-6 md:px-12 flex flex-col min-h-screen">
       
@@ -210,3 +210,36 @@ const closeReader = () => {
   currentReadingBook.value = null;
 };
 </script>
+<style>
+/* ========== 自定义滚动条样式 ========== */
+/* Firefox 浏览器的基础支持 (Firefox 不支持悬停变粗的纯 CSS 魔法，所以保持细的) */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #333333 transparent;
+}
+
+/* 1. 把轨道的真实宽度稍微设宽一点，给悬停变粗留出“物理空间” */
+::-webkit-scrollbar {
+  width: 14px; /* 基础物理宽度 */
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* 2. 平时的状态：用较厚的透明边框把滑块“挤瘦” */
+::-webkit-scrollbar-thumb {
+  background-color: #333333;
+  border-radius: 9999px;
+  /* 上下左右加 4px 透明边框。实际可见宽度 = 14px - 4px - 4px = 6px (显得很细) */
+  border: 4px solid transparent; 
+  background-clip: padding-box;
+}
+
+/* 3. 鼠标悬停的状态：颜色变亮，透明边框变薄，滑块“长胖” */
+::-webkit-scrollbar-thumb:hover {
+  background-color: #5a5a5a;
+  /* 悬停时边框收缩到 2px。实际可见宽度 = 14px - 2px - 2px = 10px (视觉变粗) */
+  border: 2px solid transparent; 
+}
+</style>

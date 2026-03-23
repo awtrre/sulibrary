@@ -139,46 +139,44 @@ let currentNodeIndex = 0;
 const applyTheme = () => {
   if (!rendition) return;
   
-  // 在 paginated 模式下，过度锁定 margin 和 line-height 会导致文字被切断
-  // 所以这里我们只注入核心的颜色、字体和基础间距，让 Epub.js 的 column 机制自然流动
   rendition.themes.default({
+    // 1. 地毯式颜色覆盖：把所有基础和内联标签的底色变黑，文字变灰
     'body, p, span, a, b, i, em, strong, div, blockquote, ul, ol, li, section, article': {
       'background-color': '#000000 !important',
       'color': '#d4d4d4 !important',
       'font-family': 'system-ui, -apple-system, sans-serif !important', 
-      'line-height': '1.6 !important',
     },    
-    'p': {
-      'margin-top': '0 !important', 
-      'margin-bottom': '1em !important',
-      'text-indent': '2em !important' // 传统段首缩进
-    },
+    
+    // 2. 标题特殊对待：颜色提亮为纯白，保留呼吸感间距
     'h1, h2, h3, h4, h5, h6': {
+      'background-color': '#000000 !important',
       'color': '#ffffff !important',
       'line-height': '1.4 !important',
       'margin-top': '1.5em !important',
       'margin-bottom': '1em !important',
     },
+
+    // 3. 段落排版约束：控制行高和首行缩进
+    'p': {
+      'line-height': '1.6 !important',
+      'margin-top': '0 !important', 
+      'margin-bottom': '1em !important',
+    },
+
+    // 4. 图片防御机制（防止撑破单页）
     'img, svg, video': {
       'display': 'block !important', 
       'margin': '1em auto !important', 
       'max-width': '100% !important',
-      'max-height': '80vh !important' // 防止图片过高撑破单页
+      'max-height': '80vh !important' 
     },
-    'sup, sub': {
-      'line-height': '0 !important', 
-      'vertical-align': 'baseline !important', 
-      'position': 'relative !important', 
-      'font-size': '75% !important' 
-    },
-    'sup': { 'top': '-0.5em !important' },
-    'sub': { 'bottom': '-0.25em !important' },
+
+    // 5. 选词高亮
     '::selection': {
       'background': '#333333 !important'
     }
   });
 };
-
 // ==========================================
 // 1. 生命周期与初始化
 // ==========================================
