@@ -213,7 +213,6 @@ async def save_progress(book_id: str, payload: dict, user_token: Optional[str] =
         )
         await db.commit()
     return {"status": "success"}
-
 # -----------------------------------------------------------------
 # 📚 书架与图书管理模块
 # -----------------------------------------------------------------

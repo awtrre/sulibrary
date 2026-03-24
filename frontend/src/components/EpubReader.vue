@@ -191,39 +191,98 @@ onUnmounted(() => {
 });
 
 const initReader = async () => {
-  // 新代码：直接读取解压后的文件夹路径
-  epubBook = ePub(`/api/static/books/${props.book.id}/`);
+  try {
+    epubBook = ePub(`/api/static/books/${props.book.id}/`);
 
-  // 获取进度
-  const res = await fetch(`/api/books/${props.book.id}/progress`, {
-    headers: {
-      'user-token': localStorage.getItem('geek_token') || '',
-      'guest-uuid': localStorage.getItem('guest_uuid') || ''
+    let savedCfi = null;
+    const progressCacheKey = `offline_progress_${props.book.id}`;
+    const syncPendingKey = `sync_pending_${props.book.id}`;
+
+    // ✨ 核心新增：开局先检查有没有需要上报的离线进度！
+    const needsSync = localStorage.getItem(syncPendingKey) === 'true';
+
+    if (needsSync) {
+      console.log("🔄 发现未同步的离线进度，正在向数字城堡提交...");
+      savedCfi = localStorage.getItem(progressCacheKey);
+      
+      try {
+        // 强行把本地最新的离线进度推给服务器
+        await fetch(`/api/books/${props.book.id}/progress`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'user-token': localStorage.getItem('geek_token') || '',
+            'guest-uuid': localStorage.getItem('guest_uuid') || ''
+          },
+          body: JSON.stringify({ cfi: savedCfi, percentage: 0 }) 
+        });
+        // 推送成功，撕掉待同步标签
+        localStorage.removeItem(syncPendingKey);
+        console.log("✅ 离线进度同步完成！");
+      } catch (e) {
+        console.warn("🕸️ 依然处于离线状态，保留同步标记。");
+      }
+    } else {
+      // 如果没有待同步的离线进度，就正常向服务器请示当前进度
+      try {
+        const res = await fetch(`/api/books/${props.book.id}/progress`, {
+          headers: {
+            'user-token': localStorage.getItem('geek_token') || '',
+            'guest-uuid': localStorage.getItem('guest_uuid') || ''
+          }
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          savedCfi = data.cfi;
+          if (savedCfi) localStorage.setItem(progressCacheKey, savedCfi);
+        }
+      } catch (error) {
+        console.warn("🕸️ 无法连接城堡数据库，启动离线进度模式...");
+        savedCfi = localStorage.getItem(progressCacheKey);
+      }
     }
-  });
-  const data = await res.json();
-  const savedCfi = data.cfi;
 
-  // 核心变更：开启 paginated 模式
-  rendition = epubBook.renderTo(viewer.value, {
-    width: '100%',
-    height: '100%',
-    flow: 'paginated', // 启用仿真翻页
-    manager: 'default',
-    spread: 'none' // 强制单页显示，防止在宽屏(如iPad竖屏)下出现尴尬的双页模式
-  });
+    if (savedCfi === 'null' || savedCfi === 'undefined') {
+      savedCfi = null;
+    }
 
-  applyTheme();
+    rendition = epubBook.renderTo(viewer.value, {
+      width: '100%',
+      height: '100%',
+      flow: 'paginated',
+      manager: 'default',
+      spread: 'none',
+      allowScriptedContent: true
+    });
 
-  rendition.display(savedCfi || undefined).then(() => {
-    // 渲染完成后计算总页数
-    generatePagination(savedCfi);
-  });
+    applyTheme();
 
-  rendition.on('selected', handleSelection);
-  setupIframeClick();
+    rendition.display(savedCfi || undefined).then(() => {
+      generatePagination(savedCfi);
+    });
+
+    rendition.on('relocated', (location) => {
+      if (!location) return;
+      const cfi = location.start.cfi;
+      
+      let progress = 0;
+      if (epubBook.locations && epubBook.locations.length > 0) {
+        progress = epubBook.locations.percentageFromCfi(cfi);
+        currentPage.value = Math.round(progress * totalPages.value) || 1;
+        inputPage.value = currentPage.value;
+      }
+      
+      saveProgressToBackend(cfi, progress);
+    });
+
+    rendition.on('selected', handleSelection);
+    setupIframeClick();
+
+  } catch (err) {
+    console.error("💥 阅读器初始化遭遇毁灭性打击:", err);
+  }
 };
-
 // ==========================================
 // 2. 交互与布局控制 (极致简化版)
 // ==========================================
@@ -308,42 +367,51 @@ const summonReference = async (query) => {
 let saveTimer = null;
 
 const saveProgressToBackend = (cfi, progress) => {
+  // 无论如何，先把最新进度刻印在本地
+  localStorage.setItem(`offline_progress_${props.book.id}`, cfi);
+  
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
     fetch(`/api/books/${props.book.id}/progress`, {
       method: 'POST',
-      headers: { 
+      headers: {
         'Content-Type': 'application/json',
         'user-token': localStorage.getItem('geek_token') || '',
         'guest-uuid': localStorage.getItem('guest_uuid') || ''
       },
       body: JSON.stringify({ cfi: cfi, percentage: progress })
+    })
+    .then(res => {
+      if (res.ok) {
+        // 🌐 联网保存成功，清理掉可能存在的"待同步"标记
+        localStorage.removeItem(`sync_pending_${props.book.id}`);
+      }
+    })
+    .catch(() => {
+      // 📴 断网了！不仅要吞掉报错，还要给这本书打上"待同步"的烙印！
+      localStorage.setItem(`sync_pending_${props.book.id}`, 'true');
+      console.log("📴 离线保存成功，已打上待同步标记！");
     });
-  }, 2000); 
+  }, 2000);
 };
 
 const generatePagination = async (savedCfi) => {
   if (!epubBook) return;
 
-  await epubBook.locations.generate(600);
-  totalPages.value = epubBook.locations.total;
+  try {
+    await epubBook.locations.generate(600);
+    totalPages.value = epubBook.locations.total;
 
-  const currentCfi = savedCfi || (rendition.currentLocation()?.start?.cfi);
-  if (currentCfi) {
-    const progress = epubBook.locations.percentageFromCfi(currentCfi);
-    currentPage.value = Math.round(progress * totalPages.value) || 1;
-    inputPage.value = currentPage.value;
+    const currentCfi = savedCfi || (rendition.currentLocation()?.start?.cfi);
+    if (currentCfi) {
+      const progress = epubBook.locations.percentageFromCfi(currentCfi);
+      currentPage.value = Math.round(progress * totalPages.value) || 1;
+      inputPage.value = currentPage.value;
+    }
+  } catch (e) {
+    // 允许在离线未缓存完全时，页码计算失败
+    console.warn("⚠️ 离线状态下无法遍历书籍生成全局页码，但不影响继续阅读！");
   }
-
-  rendition.on('relocated', (location) => {
-    const cfi = location.start.cfi;
-    const progress = epubBook.locations.percentageFromCfi(cfi);
-    
-    currentPage.value = Math.round(progress * totalPages.value) || 1;
-    inputPage.value = currentPage.value;
-
-    saveProgressToBackend(cfi, progress);
-  });
 };
 
 const jumpToTargetPage = () => {

@@ -109,7 +109,40 @@ const checkIdentity = () => {
   }
   isGuest.value = true;
 };
+// 🧹 彻底抹除上一个账号的本地记忆（包含存储和离线书籍）
+const clearAllUserCache = async () => {
+  console.log('🧹 正在清理本地残存记忆...');
 
+  // 1. 清理 LocalStorage 中的阅读进度、书架快照、同步标记
+  const keysToRemove = [];
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    if (key && (
+        key.startsWith('offline_progress_') || 
+        key.startsWith('sync_pending_') || 
+        key.startsWith('offline_bookshelf_')
+    )) {
+      keysToRemove.push(key);
+    }
+  }
+  keysToRemove.forEach(key => localStorage.removeItem(key));
+
+  // 2. 清理 Service Worker (PWA) 缓存的书籍实体文件
+  if ('caches' in window) {
+    try {
+      const cacheKeys = await caches.keys();
+      for (const key of cacheKeys) {
+        // 匹配我们在 vite.config.js 里设置的缓存名称
+        if (key.includes('epub-chapters-cache')) {
+          await caches.delete(key);
+        }
+      }
+      console.log('✨ 离线书籍碎片已被彻底销毁！');
+    } catch (err) {
+      console.error('💥 缓存清理魔法反噬:', err);
+    }
+  }
+};
 // 修复回车触发逻辑
 const executeCommand = async () => { // 加上 async
   const query = searchQuery.value.trim();
@@ -133,6 +166,7 @@ const executeCommand = async () => { // 加上 async
       if (data.status === 'success') {
         localStorage.setItem('geek_token', data.token); // 存储后端返回的真实 Token
         isGuest.value = false;
+        await clearAllUserCache();
         await fetchBookshelf(); // 立即切换到正式账号的书架
         searchQuery.value = '';
         console.log(`✨ 欢迎回来，${username}！`);
@@ -147,6 +181,7 @@ const executeCommand = async () => { // 加上 async
     localStorage.removeItem('geek_token');
     isGuest.value = true;
     // 👻 登出后，fetchBookshelf 会因为没有 token 而自动回退到 guest-uuid 对应的匿名书架
+    await clearAllUserCache();
     await fetchBookshelf(); 
     searchQuery.value = '';
     console.log('🚪 已切回游客模式，匿名书架已找回。');
@@ -186,6 +221,10 @@ watch(searchQuery, (newVal) => {
 const API_BASE = 'http://127.0.0.1:8000'; // 替换成你树莓派的实际 IP 和端口
 
 const fetchBookshelf = async () => {
+  // 1. 生成一个专属的记忆钥匙（防止游客和正式账号的书架混淆）
+  const userIdentifier = localStorage.getItem('geek_token') || localStorage.getItem('guest_uuid') || 'unknown';
+  const offlineCacheKey = `offline_bookshelf_${userIdentifier}`;
+
   try {
     const response = await fetch('/api/books', {
       headers: {
@@ -193,15 +232,28 @@ const fetchBookshelf = async () => {
         'guest-uuid': localStorage.getItem('guest_uuid') || ''
       }
     });
+    
     const data = await response.json();
     if (data.status === 'success') {
       bookshelf.value = data.books;
+      
+      // 🌐 核心魔法：联网拉取成功时，顺手把最新的书架状态“拓印”到本地 localStorage
+      localStorage.setItem(offlineCacheKey, JSON.stringify(data.books));
     }
   } catch (error) {
-    console.error('🕸️ 呼叫后端数据库失败:', error);
-    bookshelf.value = [];
+    console.warn('🕸️ 呼叫后端数据库失败，防断网机制启动！', error);
+    
+    // 📴 核心降级逻辑：断网了没关系，我们从本地记忆中提取上次的书架状态
+    const cachedBooks = localStorage.getItem(offlineCacheKey);
+    if (cachedBooks) {
+      bookshelf.value = JSON.parse(cachedBooks);
+      console.log('📦 已成功唤醒本地离线书架！');
+    } else {
+      bookshelf.value = []; // 如果是第一次打开且没网，才展示空书架
+    }
   }
 };
+
 const openReader = (book) => {
   currentReadingBook.value = book;
 };
