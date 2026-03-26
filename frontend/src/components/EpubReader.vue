@@ -198,7 +198,6 @@ const initReader = async () => {
     const progressCacheKey = `offline_progress_${props.book.id}`;
     const syncPendingKey = `sync_pending_${props.book.id}`;
 
-    // ✨ 核心新增：开局先检查有没有需要上报的离线进度！
     const needsSync = localStorage.getItem(syncPendingKey) === 'true';
 
     if (needsSync) {
@@ -206,7 +205,6 @@ const initReader = async () => {
       savedCfi = localStorage.getItem(progressCacheKey);
       
       try {
-        // 强行把本地最新的离线进度推给服务器
         await fetch(`/api/books/${props.book.id}/progress`, {
           method: 'POST',
           headers: {
@@ -216,14 +214,12 @@ const initReader = async () => {
           },
           body: JSON.stringify({ cfi: savedCfi, percentage: 0 }) 
         });
-        // 推送成功，撕掉待同步标签
         localStorage.removeItem(syncPendingKey);
         console.log("✅ 离线进度同步完成！");
       } catch (e) {
         console.warn("🕸️ 依然处于离线状态，保留同步标记。");
       }
     } else {
-      // 如果没有待同步的离线进度，就正常向服务器请示当前进度
       try {
         const res = await fetch(`/api/books/${props.book.id}/progress`, {
           headers: {
@@ -256,24 +252,56 @@ const initReader = async () => {
       allowScriptedContent: true
     });
 
+    // ⚡️ 插入 Hook：拦截渲染并注入 DOM
+    rendition.hooks.content.register((contents) => {
+      const doc = contents.document;
+      const elements = doc.querySelectorAll('p, h1, h2, h3, h4, h5, h6');
+
+      elements.forEach((el, elementIndex) => {
+        if (el.querySelector('table, img, svg')) return; 
+
+        const rawText = el.innerHTML;
+        const sentences = rawText.match(/[^。！？!?]+[。！？!?]*|.+/g); 
+        
+        if (sentences) {
+          el.innerHTML = ''; 
+          sentences.forEach((sentence, index) => {
+            const span = doc.createElement('span');
+            span.className = 'sentence-node';
+            span.id = `sentence-${elementIndex}-${index}`;
+            span.innerHTML = sentence;
+            el.appendChild(span); 
+          });
+        }
+      });
+
+      const images = doc.querySelectorAll('img, image, svg');
+      images.forEach((img, index) => {
+        img.classList.add('visual-anchor');
+        img.id = `image-anchor-${index}`;
+      });
+    });
+
     applyTheme();
 
     rendition.display(savedCfi || undefined).then(() => {
       generatePagination(savedCfi);
     });
 
+    // ⚡️ 修复后的 relocated 监听：抛弃百分比，专心记录 CFI
     rendition.on('relocated', (location) => {
       if (!location) return;
-      const cfi = location.start.cfi;
+      
+      const currentCfi = location.start.cfi; 
       
       let progress = 0;
       if (epubBook.locations && epubBook.locations.length > 0) {
-        progress = epubBook.locations.percentageFromCfi(cfi);
+        progress = epubBook.locations.percentageFromCfi(currentCfi);
         currentPage.value = Math.round(progress * totalPages.value) || 1;
         inputPage.value = currentPage.value;
       }
       
-      saveProgressToBackend(cfi, progress);
+      saveProgressToBackend(currentCfi, progress);
     });
 
     rendition.on('selected', handleSelection);
