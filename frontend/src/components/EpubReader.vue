@@ -283,14 +283,61 @@ const initReader = async () => {
 
     applyTheme();
 
-    rendition.display(savedCfi || undefined).then(() => {
-      generatePagination(savedCfi);
+// 🚀 核心破解：智能加载与二段跳兜底
+const smartDisplay = async (cfiData) => {
+  if (!cfiData) {
+    await rendition.display();
+    return;
+  }
+
+  if (cfiData.includes('|__|')) {
+    const [nativeCfi, exactData] = cfiData.split('|__|');
+
+    // 🛡️ 兼容老数据：如果数据库里存的还是 epubcfi(...)，提取出方括号里的 ID
+    let targetId = exactData;
+    if (exactData.startsWith('epubcfi')) {
+      const match = exactData.match(/\[(.*?)\]/);
+      if (match) targetId = match[1];
+    }
+
+    console.log("🪂 启动自适应二段跳... 1. 载入原生章节");
+    await rendition.display(nativeCfi); 
+
+    console.log(`🎯 DOM已重构，正在寻找精准 ID: ${targetId}`);
+    try {
+      // 🚀 核心魔法：直接在当前加载好的 iframe 里找 ID
+      const contents = rendition.getContents()[0];
+      const targetEl = contents.document.getElementById(targetId);
+
+      if (targetEl) {
+        // 让当前设备根据自己的 DOM 结构，现场生成绝对匹配的 CFI！
+        const spineItem = epubBook.spine.get(rendition.currentLocation().start.index);
+        const freshCfi = new ePub.CFI(targetEl, spineItem.cfiBase).toString();
+        await rendition.display(freshCfi);
+        console.log("✅ 现场生成 CFI 并精准定位成功！");
+      } else {
+        console.warn("⚠️ 没找到精确 ID，停在原生段落起点");
+      }
+    } catch (e) {
+      console.warn("⚠️ 第二跳发生异常", e);
+    }
+
+  } else {
+    try { await rendition.display(cfiData); } 
+    catch (e) { await rendition.display(); }
+  }
+};
+
+    smartDisplay(savedCfi).then(() => {
+      // 揭开幕布
+      if (viewer.value) viewer.value.classList.add('animate-fade-in');
       
-      // 🚨 终极防御：等排版彻底稳定、所有的初始化 relocated 都触发完之后，再把锁打开！
+      generatePagination(savedCfi?.split('|__|')[0] || savedCfi);
+      
       setTimeout(() => {
         isReadyToSave = true;
         console.log("🚀 初始渲染彻底完成，进度雷达已启动！");
-      }, 500); // 500毫秒的无敌时间
+      }, 500);
     });
 
 // ⚡️ 进度监听：突破 Iframe 视界限制的绝对坐标雷达
@@ -321,10 +368,19 @@ const initReader = async () => {
           
           // 给 absoluteLeft 一个 -10 的容错率，防止首字母斜体或标点挤压出界
           if (absoluteLeft >= -10 && absoluteLeft < viewWidth) {
-            
             const spineItem = epubBook.spine.get(location.start.index);
-            exactCfi = new ePub.CFI(el, spineItem.cfiBase).toString();
-            console.log("🎯 [雷达绝对命中]:", el.tagName === 'SPAN' ? el.innerText : `图片节点 (${el.id})`);
+        
+        // 🚀 1. 直接获取精准元素的 ID (极其稳定)
+            const preciseId = el.id;
+        
+        // 🚀 2. 获取原生的块级 CFI (用来加载章节)
+            const parentNode = el.closest('p, h1, h2, h3, h4, h5, h6') || el.parentElement || el;
+            const nativeCfi = new ePub.CFI(parentNode, spineItem.cfiBase).toString();
+        
+        // 🚀 3. 缝合：原生CFI + ID
+            combinedCfi = `${nativeCfi}|__|${preciseId}`;
+        
+            console.log("🎯 [跨端雷达锁定 ID]:", preciseId);
             break; 
           }
         }
@@ -585,6 +641,7 @@ const jumpToNextChapter = async () => {
   height: 100dvh; 
   /* 禁止文本跨列被截断 */
   column-fill: auto;
+  opacity: 0;
 }
 
 .animate-fade-in {
