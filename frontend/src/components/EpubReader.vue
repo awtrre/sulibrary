@@ -283,13 +283,14 @@ const initReader = async () => {
 
     applyTheme();
 
-    rendition.display(savedCfi || undefined).then(async () => {
-      // 🚨 核心修复：加上 await！强制等待树莓派把耗时的全局页码彻底算完！
-      await generatePagination(savedCfi);
+    rendition.display(savedCfi || undefined).then(() => {
+      generatePagination(savedCfi);
       
-      // 等它完全算完、排版死寂之后，再开锁！不需要 setTimeout！
-      isReadyToSave = true;
-      console.log("🚀 初始渲染彻底完成，进度雷达已启动！");
+      // 🚨 终极防御：等排版彻底稳定、所有的初始化 relocated 都触发完之后，再把锁打开！
+      setTimeout(() => {
+        isReadyToSave = true;
+        console.log("🚀 初始渲染彻底完成，进度雷达已启动！");
+      }, 500); // 500毫秒的无敌时间
     });
 
 // ⚡️ 进度监听：突破 Iframe 视界限制的绝对坐标雷达
