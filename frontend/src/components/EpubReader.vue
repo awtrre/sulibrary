@@ -248,39 +248,70 @@ const initReader = async () => {
       allowScriptedContent: true
     });
 
-// ⚡️ 渲染拦截：直接瞄准底层元素，精准贴上统一雷达标签
-    rendition.hooks.content.register((contents) => {
-      const doc = contents.document;
+      // ⚡️ 渲染拦截：直接瞄准底层元素，精准贴上统一雷达标签
+      rendition.hooks.content.register((contents) => {
+        const doc = contents.document;
 
-      // 1. 纯图片书的救星：不再管外层段落，直接把锚点死死钉在 img 上
-      const images = doc.querySelectorAll('img, svg, image');
-      images.forEach((img, index) => {
-        img.classList.add('sync-anchor'); // 统一的雷达标签
-        if (!img.id) img.id = `epub-img-${index}`; // 赋予唯一 ID
+        // 1. 纯图片书的救星
+        const images = doc.querySelectorAll('img, svg, image');
+        images.forEach((img, index) => {
+          img.classList.add('sync-anchor');
+          if (!img.id) img.id = `epub-img-${index}`;
+        });
+
+        // 2. 文本段落的【安全】切碎逻辑
+        const blocks = doc.querySelectorAll('p, h1, h2, h3, h4, h5, h6');
+        
+        blocks.forEach((el, blockIndex) => {
+          if (el.querySelector('img, svg, image')) return;
+
+          let sentenceIndex = 0;
+
+          // 🧙‍♂️ 深度遍历 DOM 树，只碰纯文本，避开 HTML 标签
+          const walkAndWrapTextNodes = (node) => {
+            const children = Array.from(node.childNodes);
+            
+            children.forEach(child => {
+              // 【情况 A】纯文本节点 (真正该切碎的东西)
+              if (child.nodeType === 3) {
+                const text = child.nodeValue;
+                if (!text.trim()) return;
+
+                // 🎯 这里用你的正则绝对安全
+                const sentences = text.match(/[^。！？!?\.\…]+[。！？!?\.\…]+[”’"'\)\]）】》]*|.+/g);
+                
+                if (sentences) {
+                  const fragment = doc.createDocumentFragment();
+                  sentences.forEach(s => {
+                    if (!s.trim()) return;
+                    const span = doc.createElement('span');
+                    span.className = 'sync-anchor'; // 贴上雷达标签
+                    span.id = `sentence-${blockIndex}-${sentenceIndex++}`;
+                    span.textContent = s; // 用 textContent 代替 innerHTML，原样输出
+                    fragment.appendChild(span);
+                  });
+                  // 🐷 重点修复：之前这里写成了 node.parentNode.replaceChild 导致崩溃
+                  // 正确做法：直接用当前的 node 替换它的子节点
+                  node.replaceChild(fragment, child); 
+                }
+              } 
+              // 【情况 B】元素节点 (如 <a> <span> <i>)
+              else if (child.nodeType === 1) {
+                if (!['RUBY', 'RT', 'RP', 'PRE', 'CODE'].includes(child.tagName)) {
+                  // 继续钻进去找文本
+                  walkAndWrapTextNodes(child);
+                } else {
+                  // 特殊排版标签，直接整体当作一个雷达点
+                  child.classList.add('sync-anchor');
+                  child.id = `sentence-${blockIndex}-${sentenceIndex++}`;
+                }
+              }
+            });
+          };
+
+          walkAndWrapTextNodes(el);
+        });
       });
-
-      // 2. 文本段落的切碎逻辑（保持你的核心思路）
-      const blocks = doc.querySelectorAll('p, h1, h2, h3, h4, h5, h6');
-      blocks.forEach((el, index) => {
-        // 如果这个段落里包裹着图片，直接不管它！因为上面已经直接给里面的 img 打过标签了
-        if (el.querySelector('img, svg, image')) return; 
-
-        // 纯文字的段落，继续切碎成句子
-        const rawText = el.innerHTML;
-        const sentences = rawText.match(/[^。！？!?\.\…]+[。！？!?\.\…]+[”’"'\)\]）】》]*|.+/g);
-        if (sentences) {
-          el.innerHTML = ''; 
-          sentences.forEach((s, sIndex) => {
-            const span = doc.createElement('span');
-            span.className = 'sync-anchor'; // 同样贴上统一的雷达标签
-            span.id = `sentence-${index}-${sIndex}`; 
-            span.innerHTML = s;
-            el.appendChild(span); 
-          });
-        }
-      });
-    });
-
     applyTheme();
 
 // 🚀 核心破解：智能加载与二段跳兜底
