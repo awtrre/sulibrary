@@ -194,16 +194,16 @@ const initReader = async () => {
   try {
     epubBook = ePub(`/api/static/books/${props.book.id}/`);
 
+    // --- 1. 离线/在线进度拉取逻辑 (保持原样，无需改动) ---
     let savedCfi = null;
+    let isReadyToSave = false;
     const progressCacheKey = `offline_progress_${props.book.id}`;
     const syncPendingKey = `sync_pending_${props.book.id}`;
-
     const needsSync = localStorage.getItem(syncPendingKey) === 'true';
 
     if (needsSync) {
-      console.log("🔄 发现未同步的离线进度，正在向数字城堡提交...");
+      console.log("🔄 提交离线进度...");
       savedCfi = localStorage.getItem(progressCacheKey);
-      
       try {
         await fetch(`/api/books/${props.book.id}/progress`, {
           method: 'POST',
@@ -215,9 +215,8 @@ const initReader = async () => {
           body: JSON.stringify({ cfi: savedCfi, percentage: 0 }) 
         });
         localStorage.removeItem(syncPendingKey);
-        console.log("✅ 离线进度同步完成！");
       } catch (e) {
-        console.warn("🕸️ 依然处于离线状态，保留同步标记。");
+        console.warn("🕸️ 依然离线");
       }
     } else {
       try {
@@ -227,88 +226,131 @@ const initReader = async () => {
             'guest-uuid': localStorage.getItem('guest_uuid') || ''
           }
         });
-
         if (res.ok) {
           const data = await res.json();
           savedCfi = data.cfi;
           if (savedCfi) localStorage.setItem(progressCacheKey, savedCfi);
         }
       } catch (error) {
-        console.warn("🕸️ 无法连接城堡数据库，启动离线进度模式...");
         savedCfi = localStorage.getItem(progressCacheKey);
       }
     }
 
-    if (savedCfi === 'null' || savedCfi === 'undefined') {
-      savedCfi = null;
-    }
+    if (savedCfi === 'null' || savedCfi === 'undefined') savedCfi = null;
 
+    // --- 2. 阅读器渲染初始化 ---
     rendition = epubBook.renderTo(viewer.value, {
       width: '100%',
       height: '100%',
-      flow: 'paginated',
+      flow: 'paginated', // 强制横向分页模式
       manager: 'default',
       spread: 'none',
       allowScriptedContent: true
     });
 
-    // ⚡️ 插入 Hook：拦截渲染并注入 DOM
+// ⚡️ 渲染拦截：直接瞄准底层元素，精准贴上统一雷达标签
     rendition.hooks.content.register((contents) => {
       const doc = contents.document;
-      const elements = doc.querySelectorAll('p, h1, h2, h3, h4, h5, h6');
 
-      elements.forEach((el, elementIndex) => {
-        if (el.querySelector('table, img, svg')) return; 
+      // 1. 纯图片书的救星：不再管外层段落，直接把锚点死死钉在 img 上
+      const images = doc.querySelectorAll('img, svg, image');
+      images.forEach((img, index) => {
+        img.classList.add('sync-anchor'); // 统一的雷达标签
+        if (!img.id) img.id = `epub-img-${index}`; // 赋予唯一 ID
+      });
 
+      // 2. 文本段落的切碎逻辑（保持你的核心思路）
+      const blocks = doc.querySelectorAll('p, h1, h2, h3, h4, h5, h6');
+      blocks.forEach((el, index) => {
+        // 如果这个段落里包裹着图片，直接不管它！因为上面已经直接给里面的 img 打过标签了
+        if (el.querySelector('img, svg, image')) return; 
+
+        // 纯文字的段落，继续切碎成句子
         const rawText = el.innerHTML;
-        const sentences = rawText.match(/[^。！？!?]+[。！？!?]*|.+/g); 
-        
+        const sentences = rawText.match(/[^。！？!?\.\…]+[。！？!?\.\…]+[”’"'\)\]）】》]*|.+/g);
         if (sentences) {
           el.innerHTML = ''; 
-          sentences.forEach((sentence, index) => {
+          sentences.forEach((s, sIndex) => {
             const span = doc.createElement('span');
-            span.className = 'sentence-node';
-            span.id = `sentence-${elementIndex}-${index}`;
-            span.innerHTML = sentence;
+            span.className = 'sync-anchor'; // 同样贴上统一的雷达标签
+            span.id = `sentence-${index}-${sIndex}`; 
+            span.innerHTML = s;
             el.appendChild(span); 
           });
         }
-      });
-
-      const images = doc.querySelectorAll('img, image, svg');
-      images.forEach((img, index) => {
-        img.classList.add('visual-anchor');
-        img.id = `image-anchor-${index}`;
       });
     });
 
     applyTheme();
 
-    rendition.display(savedCfi || undefined).then(() => {
-      generatePagination(savedCfi);
+    rendition.display(savedCfi || undefined).then(async () => {
+      // 🚨 核心修复：加上 await！强制等待树莓派把耗时的全局页码彻底算完！
+      await generatePagination(savedCfi);
+      
+      // 等它完全算完、排版死寂之后，再开锁！不需要 setTimeout！
+      isReadyToSave = true;
+      console.log("🚀 初始渲染彻底完成，进度雷达已启动！");
     });
 
-    // ⚡️ 修复后的 relocated 监听：抛弃百分比，专心记录 CFI
+// ⚡️ 进度监听：突破 Iframe 视界限制的绝对坐标雷达
     rendition.on('relocated', (location) => {
       if (!location) return;
+      if (!isReadyToSave) {
+        console.log("🔒 拦截到 ePub.js 初始化的虚假翻页，已屏蔽！");
+        return; 
+      }
+      let exactCfi = null; 
       
-      const currentCfi = location.start.cfi; 
+      try {
+        const contents = rendition.getContents()[0];
+        const iframeDoc = contents.document;
+        
+        // 🚨 核心破解魔法：获取大 Iframe 自身在当前屏幕上的真实偏移量！
+        const iframe = iframeDoc.defaultView.frameElement;
+        const iframeOffset = iframe.getBoundingClientRect().left; 
+        
+        const viewWidth = window.innerWidth;
+        const targets = Array.from(iframeDoc.querySelectorAll('.sync-anchor'));
+        
+        for (let el of targets) {
+          const rect = el.getBoundingClientRect();
+          
+          // 🚨 坐标系统合：元素内部位置 + Iframe的偏移位置 = 真实的屏幕视觉位置
+          const absoluteLeft = rect.left + iframeOffset;
+          
+          // 给 absoluteLeft 一个 -10 的容错率，防止首字母斜体或标点挤压出界
+          if (absoluteLeft >= -10 && absoluteLeft < viewWidth) {
+            
+            const spineItem = epubBook.spine.get(location.start.index);
+            exactCfi = new ePub.CFI(el, spineItem.cfiBase).toString();
+            console.log("🎯 [雷达绝对命中]:", el.tagName === 'SPAN' ? el.innerText : `图片节点 (${el.id})`);
+            break; 
+          }
+        }
+      } catch (e) {
+        console.error("💥 [雷达程序崩溃]:", e);
+      }
+      
+      if (!exactCfi) {
+        console.error("❌ [雷达脱靶]: 依然没抓到，需要继续排查！");
+        return; 
+      }
       
       let progress = 0;
       if (epubBook.locations && epubBook.locations.length > 0) {
-        progress = epubBook.locations.percentageFromCfi(currentCfi);
+        progress = epubBook.locations.percentageFromCfi(exactCfi);
         currentPage.value = Math.round(progress * totalPages.value) || 1;
         inputPage.value = currentPage.value;
       }
       
-      saveProgressToBackend(currentCfi, progress);
+      saveProgressToBackend(exactCfi, progress);
     });
 
     rendition.on('selected', handleSelection);
     setupIframeClick();
 
   } catch (err) {
-    console.error("💥 阅读器初始化遭遇毁灭性打击:", err);
+    console.error("💥 阅读器初始化崩溃:", err);
   }
 };
 // ==========================================
