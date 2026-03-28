@@ -5,10 +5,12 @@ import asyncio
 import uuid
 import hashlib
 import os
+import re
 import httpx
 import aiosqlite
 from pathlib import Path
 from contextlib import asynccontextmanager
+from bs4 import BeautifulSoup, NavigableString
 
 from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException, Header, Request
 from fastapi.staticfiles import StaticFiles
@@ -73,20 +75,24 @@ def _sync_extract_epub(source_path: str, target_dir: str, remove_source: bool = 
         
         if remove_source and os.path.exists(source_path):
             os.remove(source_path) # 阅后即焚
-            
+         # ✨ 新增：解压完立刻进行附魔仪式，计算单元总数！
+        print(f"🪄 开始为书籍附魔，注入绝对坐标...")
+        total_units = _inject_sync_anchors(target_dir)
+        print(f"✅ 附魔完成！共生成 {total_units} 个记忆单元。")
+        return total_units # 返回单元总数
     except Exception as e:
         print(f"💥 爆破解压失败: {e}")
         if os.path.exists(target_dir):
             shutil.rmtree(target_dir)
         raise Exception(f"魔法书结构损坏: {str(e)}")
 
-async def extract_epub_to_folder(source_path: str, book_id: str, remove_source: bool = True) -> str:
+async def extract_epub_to_folder(source_path: str, book_id: str, remove_source: bool = True) -> tuple[str, int]:
     """
-    异步包装器：防止树莓派 CPU 解压时阻塞其他用户的网络请求
+    修改返回值，现在返回 (文件夹路径, 总单元数)
     """
     target_dir = f"/app/data/books/{book_id}"
-    await asyncio.to_thread(_sync_extract_epub, source_path, target_dir, remove_source)
-    return target_dir
+    total_units = await asyncio.to_thread(_sync_extract_epub, source_path, target_dir, remove_source)
+    return target_dir, total_units
 
 async def convert_to_epub_task(source_file_path: str, book_id: str):
     """
@@ -112,14 +118,14 @@ async def convert_to_epub_task(source_file_path: str, book_id: str):
 
         print(f"✅ 转换成功，生成临时文件: {calibre_output_epub}")
 
-        # 调用爆破术
-        final_dir = await extract_epub_to_folder(calibre_output_epub, book_id, remove_source=True)
+        # 调用爆破术 (注意这里接收了两个返回值)
+        final_dir, total_units = await extract_epub_to_folder(calibre_output_epub, book_id, remove_source=True)
         
-        # 更新记忆水晶
+        # 更新记忆水晶 (加上 total_units)
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
-                "UPDATE books SET format = 'epub', file_path = ? WHERE id = ?",
-                (final_dir, book_id)
+                "UPDATE books SET format = 'epub', file_path = ?, total_units = ? WHERE id = ?",
+                (final_dir, total_units, book_id)
             )
             await db.commit()
             
@@ -135,7 +141,73 @@ async def convert_to_epub_task(source_file_path: str, book_id: str):
             await db.execute("DELETE FROM user_books WHERE book_id = ?", (book_id,))
             await db.execute("DELETE FROM books WHERE id = ?", (book_id,))
             await db.commit()
+def _inject_sync_anchors(target_dir: str) -> int:
+    """
+    🧠 附魔仪式：遍历解压后的网页，按句子和图片注入全局唯一 ID，并返回总单元数
+    """
+    total_units = 0
+    
+    for root, _, files in os.walk(target_dir):
+        for file in files:
+            if file.endswith(('.html', '.htm', '.xhtml')):
+                filepath = os.path.join(root, file)
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    # 使用 lxml 解析器速度更快
+                    soup = BeautifulSoup(f, 'lxml-xml' if file.endswith('.xhtml') else 'lxml')
 
+                # 1. 处理纯图片书的救星
+                for img in soup.find_all(['img', 'svg', 'image']):
+                    img['id'] = f"unit-{total_units}"
+                    # 处理类名，防止覆盖原有 class
+                    classes = img.get('class', [])
+                    if isinstance(classes, str): classes = [classes]
+                    img['class'] = classes + ['sync-anchor']
+                    total_units += 1
+
+                # 2. 文本段落的切碎逻辑 (深度遍历纯文本节点)
+                blocks = soup.find_all(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
+                for block in blocks:
+                    if block.find(['img', 'svg', 'image']):
+                        continue
+                    
+                    # 找到所有的纯文本节点
+                    for text_node in block.find_all(string=True):
+                        text = text_node.text
+                        if not text.strip(): continue
+                        
+                        # 避开特殊排版标签内部的文本
+                        parent = text_node.parent
+                        if parent and parent.name in ['ruby', 'rt', 'rp', 'pre', 'code']:
+                            if not parent.has_attr('id'):
+                                parent['id'] = f"unit-{total_units}"
+                                parent_classes = parent.get('class', [])
+                                if isinstance(parent_classes, str): parent_classes = [parent_classes]
+                                parent['class'] = parent_classes + ['sync-anchor']
+                                total_units += 1
+                            continue
+                            
+                        # 🎯 核心正则分句
+                        sentences = re.findall(r'[^。！？!?\.\…]+[。！？!?\.\…]+[”’"\'\)\]）】》]*|.+', text)
+                        if not sentences: continue
+                        
+                        # 创建一个临时的包裹器替换原文本
+                        fragment = soup.new_tag("span")
+                        for s in sentences:
+                            if not s.strip(): continue
+                            new_span = soup.new_tag("span", id=f"unit-{total_units}", **{'class': 'sync-anchor'})
+                            new_span.string = s
+                            fragment.append(new_span)
+                            total_units += 1
+                            
+                        text_node.replace_with(fragment)
+                        # 将 span 拆包，直接把里面的子节点挂到 DOM树上
+                        fragment.unwrap()
+
+                # 覆写回文件
+                with open(filepath, 'w', encoding='utf-8') as f:
+                    f.write(str(soup))
+                    
+    return total_units
 # -----------------------------------------------------------------
 # 🕵️‍♂️ 极客身份验证模块
 # -----------------------------------------------------------------
@@ -247,7 +319,7 @@ async def get_bookshelf(user_token: Optional[str] = Header(None), guest_uuid: Op
         async with aiosqlite.connect(db_path) as db:
             user_id = await get_current_user_id(db, user_token, guest_uuid)
             cursor = await db.execute("""
-                SELECT b.id, b.title, b.author, b.format, ub.progress_percentage, b.uploader_id, b.is_public 
+                SELECT b.id, b.title, b.author, b.format, ub.progress_percentage, b.uploader_id, b.is_public , b.total_units
                 FROM books b 
                 INNER JOIN user_books ub ON b.id = ub.book_id 
                 WHERE ub.user_id = ? 
@@ -259,7 +331,7 @@ async def get_bookshelf(user_token: Optional[str] = Header(None), guest_uuid: Op
                     "id": row[0], "title": row[1], "author": row[2] or "佚名",
                     "format": row[3], "progress": row[4],
                     "is_uploader": row[5] == user_id,
-                    "is_public": bool(row[6]), "is_owned": True
+                    "is_public": bool(row[6]), "is_owned": True, "total_units": row[7] or 0
                 })
         return {"status": "success", "books": books, "layout": "grid"}
     except Exception as e:
@@ -303,9 +375,11 @@ async def upload_magic_book(
         await db.commit()
 
     if file_ext == '.epub':
-        final_path = await extract_epub_to_folder(temp_path, book_id, remove_source=True)
+        # 接收两个返回值
+        final_path, total_units = await extract_epub_to_folder(temp_path, book_id, remove_source=True)
         async with aiosqlite.connect(db_path) as db:
-            await db.execute("UPDATE books SET file_path = ? WHERE id = ?", (final_path, book_id))
+            # 更新 total_units
+            await db.execute("UPDATE books SET file_path = ?, total_units = ? WHERE id = ?", (final_path, total_units, book_id))
             await db.commit()
         return {"status": "success", "message": "EPUB 已就绪，秒开已激活！"}
     

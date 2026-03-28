@@ -34,7 +34,8 @@ async def init_db():
                 format TEXT NOT NULL,
                 added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 uploader_id INTEGER,         -- ✨ 新增：记录书籍的源头主人
-                is_public BOOLEAN DEFAULT 0  -- ✨ 新增：是否对所有人可见
+                is_public BOOLEAN DEFAULT 0,  -- ✨ 新增：是否对所有人可见
+                total_units INTEGER DEFAULT 0         
             )
         """)
 
