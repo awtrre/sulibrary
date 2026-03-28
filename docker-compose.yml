@@ -23,8 +23,8 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./backend:/app
       - ./data:/app/data  # SQLite 数据库和你的原始书库都存在这里哦
+      - ./backend:/app
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - TTS_API_URL=http://tts:10200

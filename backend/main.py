@@ -141,72 +141,109 @@ async def convert_to_epub_task(source_file_path: str, book_id: str):
             await db.execute("DELETE FROM user_books WHERE book_id = ?", (book_id,))
             await db.execute("DELETE FROM books WHERE id = ?", (book_id,))
             await db.commit()
+
 def _inject_sync_anchors(target_dir: str) -> int:
-    """
-    🧠 附魔仪式：遍历解压后的网页，按句子和图片注入全局唯一 ID，并返回总单元数
-    """
+    import json # 确保引入 json
     total_units = 0
+    unit_map = [] # 🗺️ 藏宝图：记录每个章节对应的 unit 范围
     
+    # 1. 🔍 寻找核心 OPF 文件，确定真正的书籍阅读顺序！(修复 os.walk 的乱序隐患)
+    opf_path = None
     for root, _, files in os.walk(target_dir):
         for file in files:
-            if file.endswith(('.html', '.htm', '.xhtml')):
-                filepath = os.path.join(root, file)
-                with open(filepath, 'r', encoding='utf-8') as f:
-                    # 使用 lxml 解析器速度更快
-                    soup = BeautifulSoup(f, 'lxml-xml' if file.endswith('.xhtml') else 'lxml')
+            if file.endswith('.opf'):
+                opf_path = os.path.join(root, file)
+                break
+        if opf_path: break
+        
+    html_files = []
+    if opf_path:
+        opf_dir = os.path.dirname(opf_path)
+        with open(opf_path, 'r', encoding='utf-8') as f:
+            soup = BeautifulSoup(f, 'lxml-xml')
+            
+        # 解析 EPUB 的骨架 (manifest 和 spine)
+        manifest = {item.get('id'): item.get('href') for item in soup.find_all('item')}
+        for itemref in soup.find_all('itemref'):
+            href = manifest.get(itemref.get('idref'))
+            if href:
+                clean_href = href.split('#')[0] # 滤除自带锚点
+                full_path = os.path.join(opf_dir, clean_href)
+                if full_path not in [f[1] for f in html_files] and full_path.endswith(('.html', '.htm', '.xhtml')):
+                    # clean_href 就是 Epub.js 认得的那个相对路径
+                    html_files.append((clean_href, full_path))
+    else:
+        # 极端兜底：如果没有 OPF，勉强按文件名排序
+        for root, _, files in os.walk(target_dir):
+            for file in sorted(files):
+                if file.endswith(('.html', '.htm', '.xhtml')):
+                    full_path = os.path.join(root, file)
+                    rel_path = os.path.relpath(full_path, target_dir).replace('\\', '/')
+                    html_files.append((rel_path, full_path))
 
-                # 1. 处理纯图片书的救星
-                for img in soup.find_all(['img', 'svg', 'image']):
-                    img['id'] = f"unit-{total_units}"
-                    # 处理类名，防止覆盖原有 class
-                    classes = img.get('class', [])
-                    if isinstance(classes, str): classes = [classes]
-                    img['class'] = classes + ['sync-anchor']
-                    total_units += 1
+    # 2. 🪄 开始按正确的顺序附魔
+    for href, filepath in html_files:
+        if not os.path.exists(filepath): continue
+        
+        with open(filepath, 'r', encoding='utf-8') as f:
+            soup = BeautifulSoup(f, 'lxml-xml' if filepath.endswith('.xhtml') else 'lxml')
 
-                # 2. 文本段落的切碎逻辑 (深度遍历纯文本节点)
-                blocks = soup.find_all(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
-                for block in blocks:
-                    if block.find(['img', 'svg', 'image']):
-                        continue
-                    
-                    # 找到所有的纯文本节点
-                    for text_node in block.find_all(string=True):
-                        text = text_node.text
-                        if not text.strip(): continue
-                        
-                        # 避开特殊排版标签内部的文本
-                        parent = text_node.parent
-                        if parent and parent.name in ['ruby', 'rt', 'rp', 'pre', 'code']:
-                            if not parent.has_attr('id'):
-                                parent['id'] = f"unit-{total_units}"
-                                parent_classes = parent.get('class', [])
-                                if isinstance(parent_classes, str): parent_classes = [parent_classes]
-                                parent['class'] = parent_classes + ['sync-anchor']
-                                total_units += 1
-                            continue
-                            
-                        # 🎯 核心正则分句
-                        sentences = re.findall(r'[^。！？!?\.\…]+[。！？!?\.\…]+[”’"\'\)\]）】》]*|.+', text)
-                        if not sentences: continue
-                        
-                        # 创建一个临时的包裹器替换原文本
-                        fragment = soup.new_tag("span")
-                        for s in sentences:
-                            if not s.strip(): continue
-                            new_span = soup.new_tag("span", id=f"unit-{total_units}", **{'class': 'sync-anchor'})
-                            new_span.string = s
-                            fragment.append(new_span)
+        start_unit = total_units
+
+        # --- 这里是修改的核心部分：按页面从上到下的真实顺序统一打标 ---
+        elements = soup.find_all(['img', 'svg', 'image', 'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
+        for el in elements:
+            if el.name in ['img', 'svg', 'image']:
+                # 处理图片
+                el['id'] = f"unit-{total_units}"
+                classes = el.get('class', [])
+                if isinstance(classes, str): classes = [classes]
+                el['class'] = classes + ['sync-anchor']
+                total_units += 1
+            else:
+                # 文本切碎
+                if el.find(['img', 'svg', 'image']): continue
+                for text_node in el.find_all(string=True):
+                    text = text_node.text
+                    if not text.strip(): continue
+                    parent = text_node.parent
+                    if parent and parent.name in ['ruby', 'rt', 'rp', 'pre', 'code']:
+                        if not parent.has_attr('id'):
+                            parent['id'] = f"unit-{total_units}"
+                            parent_classes = parent.get('class', [])
+                            if isinstance(parent_classes, str): parent_classes = [parent_classes]
+                            parent['class'] = parent_classes + ['sync-anchor']
                             total_units += 1
-                            
-                        text_node.replace_with(fragment)
-                        # 将 span 拆包，直接把里面的子节点挂到 DOM树上
-                        fragment.unwrap()
+                        continue
+                    sentences = re.findall(r'[^。！？!?\.\…]+[。！？!?\.\…]+[”’"\'\)\]）】》]*|.+', text)
+                    if not sentences: continue
+                    fragment = soup.new_tag("span")
+                    for s in sentences:
+                        if not s.strip(): continue
+                        new_span = soup.new_tag("span", id=f"unit-{total_units}", **{'class': 'sync-anchor'})
+                        new_span.string = s
+                        fragment.append(new_span)
+                        total_units += 1
+                    text_node.replace_with(fragment)
+                    fragment.unwrap()
+        # --- 修改核心部分结束 ---
 
-                # 覆写回文件
-                with open(filepath, 'w', encoding='utf-8') as f:
-                    f.write(str(soup))
-                    
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write(str(soup))
+            
+        # ✨ 核心新增：记录该章节“承包”了哪些 unit！
+        if total_units > start_unit:
+            unit_map.append({
+                "href": href,
+                "start": start_unit,
+                "end": total_units - 1
+            })
+
+    # 3. 💾 将藏宝图存入这本电子书的专属目录
+    map_path = os.path.join(target_dir, 'unit_map.json')
+    with open(map_path, 'w', encoding='utf-8') as f:
+        json.dump(unit_map, f, ensure_ascii=False)
+        
     return total_units
 # -----------------------------------------------------------------
 # 🕵️‍♂️ 极客身份验证模块

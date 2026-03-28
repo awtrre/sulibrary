@@ -111,6 +111,7 @@ const ttsPlayer = ref(null);
 // --- 核心实例 ---
 let epubBook = null;
 let rendition = null;
+let unitMap = [];
 const backendApi = '/api';
 
 // --- 界面控制状态 ---
@@ -122,10 +123,11 @@ const activeOverlayTab = ref('toc');
 // --- 数据与分页状态 ---
 const wikiContent = ref('');
 const tocList = ref([]);
-const currentPage = ref(1);
-const totalPages = ref('???');
-const inputPage = ref('1');
+const currentPage = ref('-');
+const totalPages = ref('-');
+const inputPage = ref('-');
 const currentFontSize = ref(100);
+let isJumpLocked = false;
 
 // --- TTS 引擎状态 ---
 const isReading = ref(false);
@@ -237,7 +239,16 @@ const initReader = async () => {
     }
 
     if (savedCfi === 'null' || savedCfi === 'undefined') savedCfi = null;
-
+    //  偷偷拉取这本魔法书的藏宝图 (unit_map.json)
+    try {
+      const mapRes = await fetch(`/api/static/books/${props.book.id}/unit_map.json`);
+      if (mapRes.ok) {
+        unitMap = await mapRes.json();
+        console.log("🗺️ 藏宝图获取成功！包含章节数:", unitMap.length);
+      }
+    } catch (e) {
+      console.warn("⚠️ 未找到藏宝图");
+    }
     // --- 2. 阅读器渲染初始化 ---
     rendition = epubBook.renderTo(viewer.value, {
       width: '100%',
@@ -254,47 +265,51 @@ const initReader = async () => {
 // --- 3. 🚀 极速渲染与一键空降 (带安全降级) ---
     let targetLocation = savedCfi;
     
-    // 解析坐标
-    if (savedCfi) {
-      if (savedCfi.includes('|__|')) {
-        const parts = savedCfi.split('|__|');
-        
-        if (parts[0].startsWith('epubcfi')) {
-          // 兼容之前的缝合格式：epubcfi(...)|__|unit-X
-          targetLocation = parts[0]; 
-        } else {
-          // 🚀 全新的绝对同步格式：章节索引|__|unit-X
-          const spineIndex = parseInt(parts[0], 10);
-          const unitId = parts[1];
-          const spineItem = epubBook.spine.get(spineIndex);
-          if (spineItem) {
-            targetLocation = `${spineItem.href}#${unitId}`;
-          }
-        }
-      } else if (savedCfi.startsWith('epubcfi')) {
-        // 最老的纯 CFI 格式
-        targetLocation = savedCfi;
+    // 🌟 修复1：优先用后端的进度数据做一个基础估算，而不是无脑写死 1
+    let initialPageNumber = '-';
+    if (props.book.total_units && props.book.progress) {
+      initialPageNumber = Math.max(1, Math.round(props.book.progress * props.book.total_units));
+    }
+
+    // 查找具体路径与精准页码
+    if (savedCfi && savedCfi.startsWith('unit-') && unitMap.length > 0) {
+      const targetUnitId = parseInt(savedCfi.split('-')[1], 10);
+      initialPageNumber = targetUnitId; // 拿到了绝对准确的单元号
+      const mapItem = unitMap.find(m => targetUnitId >= m.start && targetUnitId <= m.end);
+      
+      if (mapItem) {
+        targetLocation = `${mapItem.href}#${savedCfi}`;
+      }
+    } else if (savedCfi && savedCfi.includes('|__|')) {
+      // 兼容过渡版本：格式通常是 "章节号|__|unit-xxx"
+      const parts = savedCfi.split('|__|');
+      targetLocation = parts[0]; 
+      
+      // 🌟 修复2：从旧格式中提取出真正的页码，而不是丢弃它！
+      if (parts[1] && parts[1].startsWith('unit-')) {
+        initialPageNumber = parseInt(parts[1].split('-')[1], 10);
       }
     }
 
-    console.log("🪂 尝试空降至:", targetLocation || "起点");
+    // ✨ 灌入 UI：此时无论是新格式、旧格式还是靠后端比例推算，都能拿到正确的数字
+    currentPage.value = initialPageNumber;
+    inputPage.value = initialPageNumber;
+    totalPages.value = props.book.total_units || '-';
+
+    console.log("🪂 查阅地图后，尝试空降至:", targetLocation || "起点");
 
     try {
-      // 尝试渲染目标位置
       await rendition.display(targetLocation || undefined);
     } catch (error) {
-      console.warn("⚠️ 历史坐标已失效或在当前设备不兼容，触发安全降级，返回首页...", error);
-      
-      // 关键修复：清除本地和后端的脏数据，防止下次进来继续报错黑屏
+      console.warn("⚠️ 坐标失效，触发安全降级，返回起点...", error);
       localStorage.removeItem(`offline_progress_${props.book.id}`);
-      saveProgressToBackend('', 0); // 告诉后端进度归零
-      
-      // 不带参数调用 display，Epub.js 会自动从头开始渲染
+      saveProgressToBackend('', 0);
       await rendition.display(); 
     }
 
-    // 无论从哪里落地，揭开幕布显示内容
     if (viewer.value) viewer.value.classList.add('animate-fade-in');
+    generatePagination(); 
+    setTimeout(() => { isReadyToSave = true; }, 500);
     
     // 初始化页码展示
     generatePagination(); 
@@ -308,6 +323,10 @@ const initReader = async () => {
     rendition.on('relocated', (location) => {
       if (!location) return;
       if (!isReadyToSave) return; // 防治初始化虚假翻页
+      if (isJumpLocked) {         // 🛡️ 500ms 盾生效，拦截跳转后的余震/二次触发
+        console.log("🛡️ 500ms盾生效中，已拦截二次提交");
+        return;
+      }
 
       try {
         const contents = rendition.getContents()[0];
@@ -336,10 +355,7 @@ const initReader = async () => {
         if (foundElement) {
           const preciseId = foundElement.id; // 例如: unit-145
           
-          // 🎯 1. 抛弃脆弱的原生 CFI，获取绝对稳定的章节索引
-          const spineIndex = location.start.index;
-          
-          // 🎯 2. 计算绝对百分比进度 (你的原逻辑保持不变)
+          // 🎯 1. 计算绝对百分比进度
           const unitMatch = preciseId.match(/unit-(\d+)/);
           const total = props.book.total_units || 1; 
           let progress = 0;
@@ -355,11 +371,11 @@ const initReader = async () => {
             progress = location.start.percentage || 0;
           }
 
-          // 🎯 3. 缝合保存：使用 "章节索引号|__|绝对ID"
-          const combinedCfi = `${spineIndex}|__|${preciseId}`;
-          console.log(`🎯 [雷达锁定] 章节: ${spineIndex}, 单元: ${preciseId}, 进度: ${(progress*100).toFixed(2)}%`);
+          // 🎯 2. 极致瘦身：只存 unit-xxxx！彻底抛弃原生 CFI
+          console.log(`🎯 [雷达锁定] 绝对单元: ${preciseId}, 进度: ${(progress*100).toFixed(2)}%`);
           
-          saveProgressToBackend(combinedCfi, progress);
+          // 直接将 "unit-145" 传给后端和本地，清爽无比！
+          saveProgressToBackend(preciseId, progress); 
         } else {
           console.warn("⚠️ 视野内未发现预处理信标");
         }
@@ -489,41 +505,68 @@ const saveProgressToBackend = (cfi, progress) => {
   }, 2000);
 };
 
-// ⚡️ 初始化页码：直接白嫖后端的绝对真理数据，耗时 0 毫秒！
+// ⚡️ 初始化总页码
 const generatePagination = () => {
   if (!epubBook) return;
-
-  const total = props.book.total_units;
-  totalPages.value = total || '???';
-
-  // 初始渲染完成前，先用历史进度恢复底部栏的“当前页(单元)”数字
-  if (total && props.book.progress) {
-    currentPage.value = Math.max(1, Math.round(props.book.progress * total));
-    inputPage.value = currentPage.value;
-  }
+  totalPages.value = props.book.total_units || '-';
+  // ✨ 移除了基于进度浮点数的模糊计算，完全信任 initReader 里的精确 unit 提取
 };
 
-// 🚀 极客空降法：按比例估算目标单元所在的章节
+// 🚀 极客空降法：依靠藏宝图实现像素级精确打击
 const jumpToTargetPage = () => {
   const targetUnit = parseInt(inputPage.value);
   const total = parseInt(totalPages.value);
 
-  if (isNaN(targetUnit) || targetUnit < 1 || targetUnit > total) {
+  if (isNaN(targetUnit) || targetUnit < 0 || targetUnit > total) {
     inputPage.value = currentPage.value; // 非法输入弹回原位
     return;
   }
   
-  // 我们无法直接用 ePub.js 跳转到某个自定义 ID，因为那需要先加载对应章节。
-  // 完美解法：算出百分比 -> 算出目标章节 -> 空降到章节头部。
-  const targetPercentage = targetUnit / total;
-  const targetSpineIndex = Math.floor(targetPercentage * epubBook.spine.length);
-  
-  console.log(`🪂 正在跨越空间，空降至第 ${targetSpineIndex} 章节...`);
-  
-  // 飞跃到对应章节。用户落地后，雷达会自动扫描当前屏幕上的 unit-X 并更新页码。
-  rendition.display(targetSpineIndex).then(() => {
-    showBars.value = false; // 跳转后自动收起菜单栏，保持沉浸
-  });
+  if (unitMap.length > 0) {
+    // 🗺️ 有地图：直接查出这个句子在哪个文件，拼装出 href#unit-X
+    const mapItem = unitMap.find(m => targetUnit >= m.start && targetUnit <= m.end);
+    
+    if (mapItem) {
+      console.log(`🪂 查阅藏宝图：目标单元 ${targetUnit} 位于 ${mapItem.href}`);
+      
+      // 🌟 核心修改：起跳前抢先存档！
+      const targetSpineItem = epubBook.spine.get(mapItem.href);
+      if (targetSpineItem) {
+        const spineIndex = targetSpineItem.index;
+        const preciseId = `unit-${targetUnit}`;
+        const combinedCfi = `${spineIndex}|__|${preciseId}`;
+        const progress = targetUnit / total;
+        
+        console.log(`💾 抢先存档: 章节 ${spineIndex}, 单元 ${preciseId}`);
+        saveProgressToBackend(combinedCfi, progress);
+        
+        // 顺手把 UI 状态改了，防止跳转途中底部页码闪烁
+        currentPage.value = targetUnit;
+      }
+
+      // 直接触发原生底层跳转
+      rendition.display(`${mapItem.href}#unit-${targetUnit}`).then(() => {
+        showBars.value = false; // 跳转后自动收起菜单栏
+        
+        // 🛡️ 落地后举起 500ms 盾：彻底无视落地引发的任何 relocated 余震
+        isJumpLocked = true;
+        setTimeout(() => { isJumpLocked = false; }, 500);
+      });
+    } else {
+      console.warn("⚠️ 未在地图中找到该单元，可能输入了越界的数字");
+      inputPage.value = currentPage.value;
+    }
+  } else {
+    // 🛡️ 极端兜底：如果没拿到地图，降级使用以前的章节比例估算法
+    const targetPercentage = targetUnit / total;
+    const targetSpineIndex = Math.floor(targetPercentage * epubBook.spine.length);
+    rendition.display(targetSpineIndex).then(() => {
+      showBars.value = false;
+      // 兜底方案没法提前知道准确的 unit，只能靠落地后的雷达扫描，所以这里同样加盾防抖即可
+      isJumpLocked = true;
+      setTimeout(() => { isJumpLocked = false; }, 500);
+    });
+  }
 };
 
 const cycleFontSize = () => {

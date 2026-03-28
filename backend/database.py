@@ -75,15 +75,6 @@ async def init_db():
 
 # --- 下面是一些提供给 main.py 调用的便捷魔法小工具 ---
 
-async def update_reading_progress(user_id: int, book_id: str, cfi: str, percentage: float):
-    """保存阅读进度，跨设备无缝衔接就靠它了！"""
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""
-            UPDATE user_books 
-            SET current_cfi = ?, progress_percentage = ?, last_read_at = CURRENT_TIMESTAMP
-            WHERE user_id = ? AND book_id = ?
-        """, (cfi, percentage, user_id, book_id))
-        await db.commit()
 
 async def save_tts_position(user_id: int, book_id: str, tts_cfi: str):
     """悄悄记住赛博播音员读到了哪里~ 🎙️"""
@@ -92,18 +83,19 @@ async def save_tts_position(user_id: int, book_id: str, tts_cfi: str):
             UPDATE user_books SET tts_cfi = ? WHERE user_id = ? AND book_id = ?
         """, (tts_cfi, user_id, book_id))
         await db.commit()
-
+        
 async def update_reading_progress(user_id: int, book_id: str, cfi: str, percentage: float):
     """
-    🌟 进度保存中枢：如果没读过就新建记录，读过就更新进度。
+    🌟 进度保存中枢（完美版）：安全更新阅读进度，绝不误伤 TTS 进度！
     """
     async with aiosqlite.connect(DB_PATH) as db:
-        # 使用 INSERT OR REPLACE 确保即使是第一次读也能存进去
+        # 使用 UPSERT 语法：插入新数据，如果主键冲突则只更新指定的字段
         await db.execute("""
-            INSERT OR REPLACE INTO user_books 
-            (user_id, book_id, current_cfi, progress_percentage, last_read_at)
-            VALUES (
-                ?, ?, ?, ?, CURRENT_TIMESTAMP
-            )
+            INSERT INTO user_books (user_id, book_id, current_cfi, progress_percentage, last_read_at)
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(user_id, book_id) DO UPDATE SET 
+                current_cfi = excluded.current_cfi,
+                progress_percentage = excluded.progress_percentage,
+                last_read_at = CURRENT_TIMESTAMP
         """, (user_id, book_id, cfi, percentage))
         await db.commit()
