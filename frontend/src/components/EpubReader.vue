@@ -4,12 +4,22 @@
     <div class="relative h-full flex-grow border-r border-neutral-800 bg-black flex items-center justify-center overflow-hidden" ref="readerMain">
       
       <div id="viewer" ref="viewer" class="w-full h-full"></div>
-      
-      <div class="absolute inset-0 grid grid-cols-[30%_40%_30%] z-10" @click="handleTouch">
-        <div class="cursor-pointer"></div>
-        <div class="cursor-pointer"></div>
-        <div class="cursor-pointer"></div>
+
+      <div
+        v-if="showSelectionMenu"
+        class="absolute z-50 bg-neutral-900 border border-neutral-800 shadow-2xl flex items-center font-mono text-xs tracking-widest animate-fade-in"
+        :style="{ top: selectionMenuPos.y + 'px', left: selectionMenuPos.x + 'px', transform: 'translate(-50%, -100%)', marginTop: '-12px' }"
+      >
+        <button @click="copyText" class="px-5 py-3 text-neutral-400 hover:text-white transition-colors">COPY</button>
+        <div class="w-px h-4 bg-neutral-800"></div>
+        <button @click="searchInWiki" class="px-5 py-3 text-neutral-400 hover:text-white transition-colors">SEARCH</button>
+        <div class="w-px h-4 bg-neutral-800"></div>
+        <button @click="markAnnotation" class="px-5 py-3 text-neutral-400 hover:text-white transition-colors">MARK</button>
+
+        <div class="absolute left-1/2 bottom-0 transform -translate-x-1/2 translate-y-full w-0 h-0 border-l-[6px] border-r-[6px] border-t-[6px] border-transparent border-t-neutral-900"></div>
+        <div class="absolute left-1/2 bottom-[-1px] transform -translate-x-1/2 translate-y-full w-0 h-0 border-l-[7px] border-r-[7px] border-t-[7px] border-transparent border-t-neutral-800 -z-10"></div>
       </div>
+
     </div>
 
     <div 
@@ -49,7 +59,19 @@
       </button>
     </div>
 
-    <div v-if="showTocOverlay" class="fixed inset-0 bg-neutral-950 z-50 flex flex-col animate-fade-in">
+    <div v-if="showAnnotationPanel" class="fixed inset-0 z-50 flex flex-col justify-end animate-fade-in">
+      <div class="absolute inset-0" @click="showAnnotationPanel = false"></div>
+      
+      <div class="relative h-1/2 bg-neutral-900 border-t border-neutral-800 flex flex-col">
+        <div class="flex justify-between px-6 py-4 border-b border-neutral-800">
+           <span class="text-neutral-500 font-mono text-xs">ANNOTATION</span>
+           <button @click="deleteAnnotation" class="text-neutral-600 hover:text-red-400">DELETE</button>
+        </div>
+        <textarea v-model="currentNoteText" class="flex-1 bg-transparent p-6 outline-none text-neutral-300" placeholder="Write something..."></textarea>
+      </div>
+    </div>
+
+    <div v-if="showTocOverlay" class="fixed inset-0 bg-neutral-900 z-50 flex flex-col animate-fade-in">
       <div class="h-16 border-b border-neutral-800 flex justify-between items-center px-8">
         <button @click="showTocOverlay = false" class="text-neutral-500 hover:text-neutral-200 text-sm tracking-widest transition-colors font-mono">
           ✕ EXIT
@@ -135,6 +157,16 @@ let currentSpineIndex = 0;
 let textNodes = [];
 let currentNodeIndex = 0;
 
+// --- ✨选词与批注专属状态 ---
+const showSelectionMenu = ref(false);
+const selectionMenuPos = ref({ x: 0, y: 0 }); 
+const currentSelection = ref({ cfi: null, text: '' });
+const showAnnotationPanel = ref(false);
+const currentNoteText = ref('');
+const activeHighlightCfi = ref(null);
+let tempSelection = null; 
+let lastClickTime = 0;   
+
 // ==========================================
 // 主题注入：适配 Paginated 模式的流式布局
 // ==========================================
@@ -147,6 +179,7 @@ const applyTheme = () => {
       'background-color': '#000000 !important',
       'color': '#d4d4d4 !important',
       'font-family': 'system-ui, -apple-system, sans-serif !important', 
+      '-webkit-touch-callout': 'none !important',
     },    
     
     // 2. 标题特殊对待：颜色提亮为纯白，保留呼吸感间距
@@ -175,7 +208,8 @@ const applyTheme = () => {
 
     // 5. 选词高亮
     '::selection': {
-      'background': '#333333 !important'
+      'background': '#262626 !important', 
+      'color': '#ffffff !important' // 确保被选中的文字保持纯白
     }
   });
 };
@@ -385,31 +419,59 @@ setTimeout(() => {
 // ==========================================
 // iframe 内部点击监听
 const setupIframeClick = () => {
-  rendition.on('click', (e) => {
-    if (showTocOverlay.value || showWiki.value) {
+  let startX = 0;
+  let startY = 0;
+  const recordStart = (e) => {
+    const event = e.changedTouches ? e.changedTouches[0] : e;
+    startX = event.clientX;
+    startY = event.clientY;
+  };
+  const handlePointerUp = (e) => {
+    const now = Date.now();
+    if (now - lastClickTime < 300) return; // 防连击
+    lastClickTime = now;
+    const event = e.changedTouches ? e.changedTouches[0] : e;
+    const endX = event.clientX;
+    const endY = event.clientY;
+    const deltaX = Math.abs(endX - startX);
+    const deltaY = Math.abs(endY - startY);
+    // 🛡️ 拦截器 1：解决问题 5。只要有任何 UI 挡在前面，轻点屏幕只负责“退出”，绝对不翻页！
+    if (showSelectionMenu.value || showTocOverlay.value || showWiki.value || showAnnotationPanel.value) {
+      showSelectionMenu.value = false;
       showTocOverlay.value = false;
       showWiki.value = false;
-      return;
+      showAnnotationPanel.value = false;
+      
+      // ✨ 顺手把浏览器原生的蓝色划词光标彻底清空
+      const contents = rendition.getContents()[0];
+      if (contents) contents.window.getSelection().removeAllRanges();
+      return; 
     }
-    const width = window.innerWidth;
-    if (e.clientX < width * 0.3) {
-      rendition.prev(); // 原生上一页
-    } else if (e.clientX > width * 0.7) {
-      rendition.next(); // 原生下一页
+    // 🛡️ 拦截器 2：解决快速划线。只要滑动距离超过 10px，就是在划词，绝对不翻页！
+    if (deltaX > 10 || deltaY > 10) return;
+    const screenWidth = window.innerWidth;
+    const realX = endX % screenWidth; 
+    if (realX < screenWidth * 0.3) {
+      rendition.prev();
+    } else if (realX > screenWidth * 0.7) {
+      rendition.next();
     } else {
       showBars.value = !showBars.value;
     }
-  });
-};
+  };
 
+  rendition.on('mousedown', recordStart);
+  rendition.on('mouseup', handlePointerUp);
+  rendition.on('touchstart', recordStart);
+  rendition.on('touchend', handlePointerUp);
+  rendition.off('click');
+};
 // 外层触控蒙版监听
 const handleTouch = (event) => {
   const rect = readerMain.value.getBoundingClientRect();
   const clickX = event.clientX - rect.left;
   const width = rect.width;
-
   if (showTocOverlay.value || showWiki.value) return;
-
   if (clickX < width * 0.3) {
     rendition.prev();
   } else if (clickX > width * 0.7) {
@@ -450,12 +512,72 @@ const jumpToCfiAndClose = (cfiOrHref) => {
 // 3. 选词高亮与维基反代加载
 // ==========================================
 const handleSelection = (cfiRange, contents) => {
+  if (showBars.value) {
+    contents.window.getSelection().removeAllRanges();
+    return;
+  }
   const text = rendition.getRange(cfiRange).toString();
   if (!text) return;
+  const range = contents.window.getSelection().getRangeAt(0);
+  const rect = range.getBoundingClientRect();
+  const iframe = contents.document.defaultView.frameElement;
+  const iframeRect = iframe.getBoundingClientRect();
+  selectionMenuPos.value = {
+    x: rect.left + iframeRect.left + (rect.width / 2),
+    y: rect.top + iframeRect.top
+  };
+  currentSelection.value = { cfi: cfiRange, text: text };
+  showSelectionMenu.value = true;
+};
+
+const closeSelection = () => {
+  showSelectionMenu.value = false;
+  if (rendition) {
+    const contents = rendition.getContents()[0];
+    if (contents) contents.window.getSelection().removeAllRanges(); // 取消原生的蓝色选区
+  }
+};
+
+const copyText = () => {
+  navigator.clipboard.writeText(currentSelection.value.text);
+  closeSelection();
+};
+
+const searchInWiki = () => {
+  summonReference(currentSelection.value.text);
+  closeSelection();
+};
+
+const markAnnotation = () => {// 🎯 核心：打上固定高亮并绑定点击事件
+  const cfi = currentSelection.value.cfi;
+  rendition.annotations.add(  // Epub.js 原生方法: add('highlight', cfi, 自定义数据, 点击回调函数, class名, 注入样式)
+    'highlight', 
+    cfi, 
+    {}, 
+    (e) => {
+      activeHighlightCfi.value = cfi;       // 当用户点击已经变成灰色的高亮块时，执行以下逻辑：
+      currentNoteText.value = ''; // TODO: 未来从数据库拉取对应的笔记
+      showAnnotationPanel.value = true;
+    }, 
+    'custom-hl', 
+    { "fill": "#808080", "fill-opacity": "0.3", "mix-blend-mode": "multiply" } // 极简灰底色
+  );
   
-  rendition.annotations.add('highlight', cfiRange, {}, null, 'gray');
-  contents.window.getSelection().removeAllRanges();
-  summonReference(text);
+  closeSelection();
+};
+
+// --- 底部笔记面板逻辑 ---
+const closeAnnotationPanel = () => {
+  showAnnotationPanel.value = false;
+  // TODO: 后端联调时，在此处将 currentNoteText.value 与 activeHighlightCfi.value 保存到 SQLite
+  console.log("Saving note for CFI:", activeHighlightCfi.value, currentNoteText.value);
+};
+
+const deleteAnnotation = () => {
+  // 调用 Epub.js 接口删除高亮 UI
+  rendition.annotations.remove(activeHighlightCfi.value, 'highlight');
+  showAnnotationPanel.value = false;
+  // TODO: 后端联调时，在此处请求接口删除该条记录
 };
 
 const summonReference = async (query) => {
