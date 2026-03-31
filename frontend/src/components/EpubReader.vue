@@ -1,9 +1,15 @@
 <template>
-  <div class="fixed inset-0 bg-neutral-900 text-neutral-100 flex overflow-hidden z-50 font-sans">
+  <div class="fixed inset-0 bg-neutral-900 text-neutral-100 flex overflow-hidden z-50 font-sans select-none">
     
     <div class="relative h-full flex-grow border-r border-neutral-800 bg-black flex items-center justify-center overflow-hidden" ref="readerMain">
       
       <div id="viewer" ref="viewer" class="w-full h-full"></div>
+      <div
+        v-if="showBars"
+        class="absolute inset-0 z-30"
+        @click.stop="showBars = false"
+        @touchstart.prevent="showBars = false"
+      ></div>
 
       <div
         v-if="showSelectionMenu"
@@ -60,14 +66,20 @@
     </div>
 
     <div v-if="showAnnotationPanel" class="fixed inset-0 z-50 flex flex-col justify-end animate-fade-in">
-      <div class="absolute inset-0" @click="showAnnotationPanel = false"></div>
+      <div class="absolute inset-0" @click="closeAnnotationPanel"></div>
       
-      <div class="relative h-1/2 bg-neutral-900 border-t border-neutral-800 flex flex-col">
-        <div class="flex justify-between px-6 py-4 border-b border-neutral-800">
-           <span class="text-neutral-500 font-mono text-xs">ANNOTATION</span>
-           <button @click="deleteAnnotation" class="text-neutral-600 hover:text-red-400">DELETE</button>
+      <div class="relative h-1/2 bg-neutral-900 border-t border-neutral-800 flex flex-col pointer-events-auto">
+        <div class="flex justify-start gap-8 px-8 py-4 border-b border-neutral-800 text-xs font-mono tracking-widest">
+           <button @click="copyActiveAnnotation" class="text-neutral-500 hover:text-neutral-100 transition-colors outline-none focus:outline-none">COPY</button>
+           <button @click="searchActiveAnnotation" class="text-neutral-500 hover:text-neutral-100 transition-colors outline-none focus:outline-none">SEARCH</button>
+           <button @click="deleteAnnotation" class="text-neutral-500 hover:text-neutral-100 transition-colors outline-none focus:outline-none">DELETE</button>
         </div>
-        <textarea v-model="currentNoteText" class="flex-1 bg-transparent p-6 outline-none text-neutral-300" placeholder="Write something..."></textarea>
+        <textarea 
+          v-model="currentNoteText" 
+          @input="syncNote"
+          class="flex-1 bg-transparent p-8 outline-none text-neutral-300 resize-none" 
+          placeholder="Write something..."
+        ></textarea>
       </div>
     </div>
 
@@ -96,15 +108,16 @@
       </div>
     </div>
 
-    <div 
-      v-if="showWiki" 
-      class="absolute right-0 w-1/2 h-full bg-neutral-950/95 backdrop-blur-sm p-8 overflow-y-auto transform transition-transform duration-300 border-l border-neutral-800 z-50 shadow-2xl"
-    >
-      <div class="flex justify-between items-center mb-6">
-        <h3 class="text-sm font-bold tracking-[0.3em] text-neutral-400">REFERENCE PORTAL</h3>
-        <button @click="showWiki = false" class="text-xl text-neutral-600 hover:text-white transition-colors">×</button>
+    <div v-if="showWiki" class="fixed inset-0 z-50 flex flex-col justify-end animate-fade-in">
+      <div class="absolute inset-0" @click="showWiki = false"></div>
+      
+      <div class="relative h-1/2 bg-neutral-900 border-t border-neutral-800 flex flex-col pointer-events-auto p-8 overflow-y-auto">
+        <div class="flex justify-between items-center mb-6">
+          <h3 class="text-xs font-bold font-mono tracking-[0.3em] text-neutral-400">REFERENCE PORTAL</h3>
+          <button @click="showWiki = false" class="text-xl text-neutral-600 hover:text-neutral-100 transition-colors outline-none focus:outline-none">×</button>
+        </div>
+        <div class="wiki-content prose prose-neutral prose-invert max-w-none text-sm" v-html="wikiContent"></div>
       </div>
-      <div class="wiki-content prose prose-neutral prose-invert max-w-none" v-html="wikiContent"></div>
     </div>
 
     <audio ref="ttsPlayer" @ended="handleAudioEnded" @error="handleAudioError" class="hidden"></audio>
@@ -164,8 +177,12 @@ const currentSelection = ref({ cfi: null, text: '' });
 const showAnnotationPanel = ref(false);
 const currentNoteText = ref('');
 const activeHighlightCfi = ref(null);
-let tempSelection = null; 
+const annotationDataMap = {};
 let lastClickTime = 0;   
+let isPointerDown = false; 
+let pendingSelection = null;
+let uiWasOpen = false;   
+let tapActionTimer = null;
 
 // ==========================================
 // 主题注入：适配 Paginated 模式的流式布局
@@ -210,6 +227,12 @@ const applyTheme = () => {
     '::selection': {
       'background': '#262626 !important', 
       'color': '#ffffff !important' // 确保被选中的文字保持纯白
+    },
+    // 6. ✨ 新增：高亮防覆盖机制
+    '.custom-hl': {
+      'pointer-events': 'auto !important',       // 保证它依然能被点击
+      'user-select': 'none !important',          // 彻底禁止在这个高亮块上二次划词
+      '-webkit-user-select': 'none !important'
     }
   });
 };
@@ -299,6 +322,33 @@ const initReader = async () => {
     // 🎨 应用极简黑白灰主题 (无需再写 hooks 拦截器)
     applyTheme();
     rendition.themes.fontSize(`${currentFontSize.value}%`);  // ✨ 确保在 display 渲染前，先设置好拿到的字号
+    // --- ✨ 新增：注入 iframe 底层原生守卫 ---
+    rendition.on('rendered', (e, iframe) => {
+      const doc = iframe.document;
+
+      doc.addEventListener('selectionchange', () => {
+        const selection = iframe.window.getSelection();
+        if (!selection || selection.isCollapsed || selection.toString().trim() === '') {
+          showSelectionMenu.value = false;
+          pendingSelection = null;
+        }
+      });
+
+      const finalizeSelection = () => {
+        isPointerDown = false;
+        setTimeout(() => {
+          if (pendingSelection) {
+            selectionMenuPos.value = pendingSelection.pos;
+            currentSelection.value = { ...pendingSelection };
+            showSelectionMenu.value = true;
+            pendingSelection = null;
+          }
+        }, 50); 
+      };
+
+      doc.addEventListener('touchend', finalizeSelection);
+      doc.addEventListener('mouseup', finalizeSelection);
+    });
 
 // --- 3. 🚀 极速渲染与一键空降 (极简重构版) ---
 let targetLocation = savedCfi;
@@ -421,43 +471,78 @@ setTimeout(() => {
 const setupIframeClick = () => {
   let startX = 0;
   let startY = 0;
+
   const recordStart = (e) => {
+    isPointerDown = true;
+    pendingSelection = null;
+
+    // ⚡ 修复 1：在清空任何 UI 前，先拍一张“快照”
+    // 如果手指按下去的时候，屏幕上有任何菜单/面板，就标记为 true
+    uiWasOpen = showBars.value || showSelectionMenu.value || showTocOverlay.value || showWiki.value || showAnnotationPanel.value;
+
+    showSelectionMenu.value = false; 
+
     const event = e.changedTouches ? e.changedTouches[0] : e;
     startX = event.clientX;
     startY = event.clientY;
   };
+
   const handlePointerUp = (e) => {
+    isPointerDown = false; 
+    if (pendingSelection) {
+      setTimeout(() => {
+        if (pendingSelection) {
+          selectionMenuPos.value = pendingSelection.pos;
+          currentSelection.value = { ...pendingSelection };
+          showSelectionMenu.value = true;
+          pendingSelection = null;
+        }
+      }, 50);
+    }
     const now = Date.now();
-    if (now - lastClickTime < 300) return; // 防连击
+    if (now - lastClickTime < 300) return; 
     lastClickTime = now;
+
     const event = e.changedTouches ? e.changedTouches[0] : e;
     const endX = event.clientX;
     const endY = event.clientY;
     const deltaX = Math.abs(endX - startX);
     const deltaY = Math.abs(endY - startY);
-    // 🛡️ 拦截器 1：解决问题 5。只要有任何 UI 挡在前面，轻点屏幕只负责“退出”，绝对不翻页！
-    if (showSelectionMenu.value || showTocOverlay.value || showWiki.value || showAnnotationPanel.value) {
-      showSelectionMenu.value = false;
+
+
+    // 🛡️ 拦截器 1：使用刚拍好的“快照”来判断！
+    // 如果按下瞬间有 UI 挡着，说明用户的核心诉求是“退出 UI”，绝对不许翻页！
+    if (uiWasOpen) {
+      showBars.value = false;
       showTocOverlay.value = false;
       showWiki.value = false;
       showAnnotationPanel.value = false;
       
-      // ✨ 顺手把浏览器原生的蓝色划词光标彻底清空
       const contents = rendition.getContents()[0];
       if (contents) contents.window.getSelection().removeAllRanges();
       return; 
     }
-    // 🛡️ 拦截器 2：解决快速划线。只要滑动距离超过 10px，就是在划词，绝对不翻页！
+
     if (deltaX > 10 || deltaY > 10) return;
-    const screenWidth = window.innerWidth;
-    const realX = endX % screenWidth; 
-    if (realX < screenWidth * 0.3) {
-      rendition.prev();
-    } else if (realX > screenWidth * 0.7) {
-      rendition.next();
-    } else {
-      showBars.value = !showBars.value;
-    }
+
+    const contents = rendition.getContents()[0];
+    const selection = contents ? contents.window.getSelection() : null;
+    if (selection && !selection.isCollapsed && selection.toString().trim().length > 0) return;
+
+    // ⚡ 修复 2：给“翻页/呼出菜单”加上 80ms 的生死时速延迟！
+    // 为什么？为了让 Epub.js 有时间去触发“点击了高亮块”的事件
+    clearTimeout(tapActionTimer);
+    tapActionTimer = setTimeout(() => {
+      const screenWidth = window.innerWidth;
+      const realX = endX % screenWidth; 
+      if (realX < screenWidth * 0.3) {
+        rendition.prev();
+      } else if (realX > screenWidth * 0.7) {
+        rendition.next();
+      } else {
+        showBars.value = !showBars.value; 
+      }
+    }, 80); // 80ms 对人类视觉是毫无延迟感的
   };
 
   rendition.on('mousedown', recordStart);
@@ -466,6 +551,7 @@ const setupIframeClick = () => {
   rendition.on('touchend', handlePointerUp);
   rendition.off('click');
 };
+
 // 外层触控蒙版监听
 const handleTouch = (event) => {
   const rect = readerMain.value.getBoundingClientRect();
@@ -516,19 +602,52 @@ const handleSelection = (cfiRange, contents) => {
     contents.window.getSelection().removeAllRanges();
     return;
   }
-  const text = rendition.getRange(cfiRange).toString();
+  
+  const text = rendition.getRange(cfiRange).toString().trim();
   if (!text) return;
+
   const range = contents.window.getSelection().getRangeAt(0);
   const rect = range.getBoundingClientRect();
   const iframe = contents.document.defaultView.frameElement;
   const iframeRect = iframe.getBoundingClientRect();
-  selectionMenuPos.value = {
-    x: rect.left + iframeRect.left + (rect.width / 2),
-    y: rect.top + iframeRect.top
+
+  const pos = { 
+    x: rect.left + iframeRect.left + (rect.width / 2), 
+    y: rect.top + iframeRect.top 
   };
-  currentSelection.value = { cfi: cfiRange, text: text };
-  showSelectionMenu.value = true;
-};
+
+  // 🎯 寻找 nodeX：向上寻找最近的带有 ID 的标签
+  let startNode = range.startContainer;
+  if (startNode.nodeType === 3) startNode = startNode.parentNode;
+  let targetElement = startNode.closest('[id]'); 
+  let nodeId = targetElement ? targetElement.id : 'unknown_node';
+
+  // 📏 计算偏移量：即便跨段落，偏移量也相对于 startNode 所在的这个 nodeId
+  let startOffset = 0;
+  if (targetElement) {
+    const preRange = range.cloneRange();
+    preRange.selectNodeContents(targetElement);
+    preRange.setEnd(range.startContainer, range.startOffset);
+    startOffset = preRange.toString().length;
+  }
+
+  const selectionData = {
+    cfi: cfiRange, // 仅用于前端绘制，不进数据库
+    text: text, 
+    pos: pos, 
+    nodeX: nodeId,
+    startOffset: startOffset,
+    endOffset: startOffset + text.length
+  };
+
+  if (isPointerDown) {
+    pendingSelection = selectionData;
+  } else {
+    selectionMenuPos.value = pos;
+    currentSelection.value = selectionData;
+    showSelectionMenu.value = true;
+  }
+}; // 确保这里只有一个结束大括号
 
 const closeSelection = () => {
   showSelectionMenu.value = false;
@@ -538,46 +657,68 @@ const closeSelection = () => {
   }
 };
 
-const copyText = () => {
-  navigator.clipboard.writeText(currentSelection.value.text);
-  closeSelection();
-};
-
-const searchInWiki = () => {
-  summonReference(currentSelection.value.text);
-  closeSelection();
-};
-
-const markAnnotation = () => {// 🎯 核心：打上固定高亮并绑定点击事件
+const markAnnotation = () => {
   const cfi = currentSelection.value.cfi;
-  rendition.annotations.add(  // Epub.js 原生方法: add('highlight', cfi, 自定义数据, 点击回调函数, class名, 注入样式)
+  
+  // 🎯 存入包含精确位置的完美数据包
+  annotationDataMap[cfi] = {
+    text: currentSelection.value.text,
+    nodeX: currentSelection.value.nodeX,
+    startOffset: currentSelection.value.startOffset, // 存入
+    endOffset: currentSelection.value.endOffset,     // 存入
+    note: '' 
+  };
+  rendition.annotations.add(
     'highlight', 
     cfi, 
     {}, 
     (e) => {
-      activeHighlightCfi.value = cfi;       // 当用户点击已经变成灰色的高亮块时，执行以下逻辑：
-      currentNoteText.value = ''; // TODO: 未来从数据库拉取对应的笔记
+      clearTimeout(tapActionTimer);
+      activeHighlightCfi.value = cfi;
+      // 🎯 核心：再次点击时，把字典里存的笔记读取到输入框里
+      currentNoteText.value = annotationDataMap[cfi].note || '';     
       showAnnotationPanel.value = true;
     }, 
     'custom-hl', 
-    { "fill": "#808080", "fill-opacity": "0.3", "mix-blend-mode": "multiply" } // 极简灰底色
+    { "fill": "#808080", "fill-opacity": "0.3", "mix-blend-mode": "multiply" } 
   );
-  
   closeSelection();
 };
-
-// --- 底部笔记面板逻辑 ---
+// --- ✨ 2. 新增：实时同步打字内容到字典 ---
+const syncNote = () => {
+  if (activeHighlightCfi.value && annotationDataMap[activeHighlightCfi.value]) {
+    annotationDataMap[activeHighlightCfi.value].note = currentNoteText.value;
+  }
+};
+// --- ✨ 3. 升级：标准化的关闭动作 ---
 const closeAnnotationPanel = () => {
   showAnnotationPanel.value = false;
-  // TODO: 后端联调时，在此处将 currentNoteText.value 与 activeHighlightCfi.value 保存到 SQLite
-  console.log("Saving note for CFI:", activeHighlightCfi.value, currentNoteText.value);
+  // TODO: 后端联调时，在这个位置触发 fetch/axios 请求，
+  // 把 annotationDataMap[activeHighlightCfi.value] 发送给服务器保存
+  console.log("💾 当前高亮数据已暂存:", annotationDataMap[activeHighlightCfi.value]);
+};
+
+const copyActiveAnnotation = () => {
+  const data = annotationDataMap[activeHighlightCfi.value];
+  if (data) {
+    navigator.clipboard.writeText(data.text);
+    // 可选：加个轻微反馈
+    console.log("Copied:", data.text);
+  }
+};
+
+const searchActiveAnnotation = () => {
+  const data = annotationDataMap[activeHighlightCfi.value];
+  if (data) {
+    showAnnotationPanel.value = false; // 关闭批注栏
+    summonReference(data.text);        // 弹起维基半屏
+  }
 };
 
 const deleteAnnotation = () => {
-  // 调用 Epub.js 接口删除高亮 UI
   rendition.annotations.remove(activeHighlightCfi.value, 'highlight');
+  delete annotationDataMap[activeHighlightCfi.value]; // 🧹 打扫卫生
   showAnnotationPanel.value = false;
-  // TODO: 后端联调时，在此处请求接口删除该条记录
 };
 
 const summonReference = async (query) => {
