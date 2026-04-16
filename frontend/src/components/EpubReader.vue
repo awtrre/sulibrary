@@ -92,7 +92,8 @@ import { ref, onMounted, onUnmounted } from 'vue';
 import ePub from 'epubjs';
 import SelectionOverlay from './SelectionOverlay.vue';
 const selectionOverlayRef = ref(null);
-
+const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry/i.test(navigator.userAgent) || 
+                 (navigator.maxTouchPoints > 0 && 'ontouchstart' in window);
 const props = defineProps({
   book: {
     type: Object,
@@ -151,21 +152,14 @@ let tapLock = false;
 // ==========================================
 const applyTheme = () => {
   if (!rendition) return;
-  
-  rendition.themes.default({
-    'body': {
-      'user-select': 'none !important',
-      '-webkit-user-select': 'none !important',
-    },
-    // 1. 地毯式颜色覆盖：把所有基础和内联标签的底色变黑，文字变灰
+  const themeBase = {
+    // 注意：这里去掉了 user-select 属性！
     'body, p, span, a, b, i, em, strong, div, blockquote, ul, ol, li, section, article': {
       'background-color': '#000000 !important',
       'color': '#d4d4d4 !important',
       'font-family': 'system-ui, -apple-system, sans-serif !important', 
-      '-webkit-touch-callout': 'none !important',
-    },    
-    
-    // 2. 标题特殊对待：颜色提亮为纯白，保留呼吸感间距
+      '-webkit-touch-callout': 'none !important', // 禁止手机长按弹出图片保存等原生菜单
+    },  
     'h1, h2, h3, h4, h5, h6': {
       'background-color': '#000000 !important',
       'color': '#ffffff !important',
@@ -173,34 +167,35 @@ const applyTheme = () => {
       'margin-top': '1.5em !important',
       'margin-bottom': '1em !important',
     },
-
-    // 3. 段落排版约束：控制行高和首行缩进
     'p': {
       'line-height': '1.6 !important',
       'margin-top': '0 !important', 
       'margin-bottom': '1em !important',
     },
-
-    // 4. 图片防御机制（防止撑破单页）
     'img, svg, video': {
       'display': 'block !important', 
       'margin': '1em auto !important', 
       'max-width': '100% !important',
       'max-height': '80vh !important' 
     },
-
-    // 5. 选词高亮
     '::selection': {
       'background': '#262626 !important', 
-      'color': '#ffffff !important' // 确保被选中的文字保持纯白
+      'color': '#ffffff !important' 
     },
-    // 6. ✨ 新增：高亮防覆盖机制
     '.custom-hl': {
-      'pointer-events': 'all !important',       // 保证它依然能被点击
-      'user-select': 'none !important',          // 彻底禁止在这个高亮块上二次划词
+      'pointer-events': 'all !important', 
+      'user-select': 'none !important', 
       '-webkit-user-select': 'none !important'
     }
-  });
+  };
+  if (!isMobile) {
+    themeBase['body'] = {
+      'user-select': 'none !important',
+      '-webkit-user-select': 'none !important',
+    };
+  }
+  // 第三步：把组装好的字典，正式注入给 Epub 阅读器
+  rendition.themes.default(themeBase);
 };
 // ==========================================
 // 1. 生命周期与初始化 (重构极简版)
@@ -266,6 +261,8 @@ const initReader = async () => {
     // 4. Iframe 内部事件拦截：交给子组件 SelectionOverlay 处理 [cite: 2]
     rendition.on('rendered', (e, iframe) => {
       const doc = iframe.document;
+      
+      // 这个可以保留，未来可能有用
       doc.addEventListener('selectionchange', () => {
         const selection = iframe.window.getSelection();
         if (!selection || selection.isCollapsed || selection.toString().trim() === '') {
@@ -273,39 +270,41 @@ const initReader = async () => {
         }
       });
 
-      const finalizeSelection = () => {
-        isPointerDown = false;
-        // 给 iOS 系统的原生自动扩选（比如单词自动扩充到整句）留出 150ms 的时间
-        setTimeout(() => {
-          const contents = rendition.getContents()[0];
-          if (!contents) return;
+      // 📱 手机端专属：依靠系统原生长按划词，并延迟 150ms 抓取选区
+      if (isMobile) {
+        const finalizeSelection = () => {
+          isPointerDown = false;
+          // 给 iOS 系统的原生自动扩选留出 150ms 的时间
+          setTimeout(() => {
+            const contents = rendition.getContents()[0];
+            if (!contents) return;
 
-          const selection = contents.window.getSelection();
-          
-          // 判读此时此刻，屏幕上是否有完整、确定的原生蓝色选区？
-          if (selection && !selection.isCollapsed && selection.toString().trim() !== '') {
-            const range = selection.getRangeAt(0);
-            const text = selection.toString().trim();
+            const selection = contents.window.getSelection();
             
-            try {
-              // 主动出击：根据目前最终的 DOM 选区，自己当场生成最新的 CFI 坐标
-              const finalCfi = contents.cfiFromRange(range);
+            // 判读此时此刻，屏幕上是否有完整、确定的原生蓝色选区？
+            if (selection && !selection.isCollapsed && selection.toString().trim() !== '') {
+              const range = selection.getRangeAt(0);
+              const text = selection.toString().trim();
               
-              // 直接传 false，强制触发画“临时高亮”和“逼退原生菜单”的狸猫换太子逻辑！
-              selectionOverlayRef.value?.processSelection(finalCfi, text, range, contents, false);
-            } catch (err) {
-              console.warn("最新选区获取失败，降级使用缓存数据");
+              try {
+                // 主动出击：根据目前最终的 DOM 选区，生成 CFI 坐标
+                const finalCfi = contents.cfiFromRange(range);
+                selectionOverlayRef.value?.processSelection(finalCfi, text, range, contents, false);
+              } catch (err) {
+                console.warn("最新选区获取失败，降级使用缓存数据");
+                selectionOverlayRef.value?.showPendingMenu();
+              }
+            } else {
+              // 如果没选区，安全释放可能挂起的菜单
               selectionOverlayRef.value?.showPendingMenu();
             }
-          } else {
-            // 如果没选区，说明可能只是一次普通的点击，安全释放可能挂起的菜单
-            selectionOverlayRef.value?.showPendingMenu();
-          }
-        }, 150); 
-      };
+          }, 150); 
+        };
 
-      doc.addEventListener('touchend', finalizeSelection);
-      doc.addEventListener('mouseup', finalizeSelection);
+        // 只有手机端才监听这两个抬手事件
+        doc.addEventListener('touchend', finalizeSelection);
+        doc.addEventListener('mouseup', finalizeSelection); 
+      }
     });
 
     // 5. 计算初始空降位置
@@ -393,8 +392,6 @@ const setupIframeClick = () => {
 
   const recordStart = (e) => {
     isPointerDown = true;
-    
-    // 拍下快照：当前是否有UI挡着？
     uiWasOpen = showBars.value || showTocOverlay.value || selectionOverlayRef.value?.isAnyUIOpen();
     selectionOverlayRef.value?.hideMenuOnly(); 
 
@@ -402,15 +399,20 @@ const setupIframeClick = () => {
     startX = event.clientX;
     startY = event.clientY;
 
-    // 🛑 核心修改：如果当前有菜单开着（说明这一击是为了关闭菜单）
-    // 那么绝对不要把事件传给子组件，直接掐断长按划词的可能性！
-    if (!uiWasOpen) {
+    // 💻 电脑端专属：委托子组件处理长按接管
+    if (!isMobile && !uiWasOpen) {
       selectionOverlayRef.value?.processPointerDown(e, startX, startY);
     }
   };
 
   const handlePointerUp = (e) => {
     isPointerDown = false; 
+
+    // 💻 电脑端专属：询问是否长按
+    if (!isMobile) {
+      const isLongPress = selectionOverlayRef.value?.processPointerUp();
+      if (isLongPress) return;
+    }
 
     // 🛡️ 防线1：高亮绝对防御锁 (防止点开笔记时触发翻页)
     const isLongPress = selectionOverlayRef.value?.processPointerUp();

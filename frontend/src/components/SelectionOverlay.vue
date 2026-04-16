@@ -72,6 +72,8 @@ const props = defineProps({
 
 // 向父组件汇报特定事件（比如绘制高亮时需要拦截父组件的点击翻页）
 const emit = defineEmits(['cancel-tap']);
+const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry/i.test(navigator.userAgent) || 
+                 (navigator.maxTouchPoints > 0 && 'ontouchstart' in window);
 
 // --- 状态封闭化：原 EpubReader 中的 UI 状态全部迁移至此 ---
 const showSelectionMenu = ref(false);
@@ -235,7 +237,6 @@ const processPointerDown = (e, x, y) => {
   const doc = contents.document;
   const win = contents.window;
 
-  // ⏱️ 修改 1：长按时间从 450ms 缩短到 300ms，更加跟手
   longPressTimer = setTimeout(() => {
     isLongPressTriggered.value = true;
     setSelectionLayerActive(true); // 🔓 揭开图层
@@ -253,6 +254,7 @@ const processPointerDown = (e, x, y) => {
         const moveY = moveEvt.clientY || (moveEvt.touches && moveEvt.touches[0].clientY);
 
         const currentRange = getRangeAtPoint(doc, moveX, moveY);
+        // 🚀 回滚核心：删除了所有的 nodeType 限制，直接让浏览器接管跨段落、跨区块的选区蔓延！
         if (currentRange && selection.setBaseAndExtent) {
           selection.setBaseAndExtent(
             startRange.startContainer, startRange.startOffset,
@@ -266,6 +268,24 @@ const processPointerDown = (e, x, y) => {
         doc.removeEventListener('touchmove', onMove);
         doc.removeEventListener('mouseup', onUp);
         doc.removeEventListener('touchend', onUp);
+        
+        // 💻 电脑端专属：抬手后延迟 150ms 结算选区并呼出菜单（手机端不用这个，靠 EpubReader 里的 touchend）
+        if (!isMobile) {
+          setTimeout(() => {
+            const currentSelection = win.getSelection();
+            if (currentSelection && !currentSelection.isCollapsed && currentSelection.toString().trim() !== '') {
+              const range = currentSelection.getRangeAt(0);
+              const text = currentSelection.toString().trim();
+              try {
+                const finalCfi = contents.cfiFromRange(range);
+                processSelection(finalCfi, text, range, contents, false);
+              } catch (err) {
+                console.warn("选区获取失败，尝试降级");
+                showPendingMenu();
+              }
+            }
+          }, 150);
+        }
       };
 
       doc.addEventListener('mousemove', onMove);
@@ -289,8 +309,10 @@ const clearNativeSelection = () => {
     const contents = props.rendition.getContents()[0];
     if (contents) {
       contents.window.getSelection().removeAllRanges();
-      // 🔒 盖上玻璃：进入翻页模式
-      setSelectionLayerActive(false); 
+      // 💻 电脑端专属：重新盖上玻璃
+      if (!isMobile) {
+        setSelectionLayerActive(false); 
+      }
     }
   }
 };
@@ -350,7 +372,9 @@ const processSelection = (cfiRange, text, range, contents, isPointerDownFlag) =>
 
     // 🔒 核心修复：菜单马上要出来了，赶紧把“玻璃”盖回去！
     // 这样用户在菜单显示期间，怎么乱划都不会再触发选词了
-    setSelectionLayerActive(false);
+    if (!isMobile) {
+      setSelectionLayerActive(false);
+    }
 
     // 弹出自定义极简菜单
     showSelectionMenu.value = true;
