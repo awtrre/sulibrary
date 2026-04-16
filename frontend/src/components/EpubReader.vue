@@ -4,29 +4,20 @@
     <div class="relative h-full flex-grow border-r border-neutral-800 bg-black flex items-center justify-center overflow-hidden" ref="readerMain">
       
       <div id="viewer" ref="viewer" class="w-full h-full"></div>
+
+      <SelectionOverlay 
+        ref="selectionOverlayRef" 
+        v-if="rendition" 
+        :rendition="rendition" 
+        @cancel-tap="clearTapTimer"
+      />
+
       <div
         v-if="showBars"
         class="absolute inset-0 z-30"
         @click.stop="showBars = false"
         @touchstart.prevent="showBars = false"
       ></div>
-
-      <div
-        v-if="showSelectionMenu"
-        class="absolute z-50 bg-neutral-900 border border-neutral-800 shadow-2xl flex items-center font-mono text-xs tracking-widest animate-fade-in"
-        :style="{ top: selectionMenuPos.y + 'px', left: selectionMenuPos.x + 'px', transform: 'translate(-50%, -100%)', marginTop: '-12px' }"
-      >
-        <button @click="copyText" class="px-5 py-3 text-neutral-400 hover:text-white transition-colors">COPY</button>
-        <div class="w-px h-4 bg-neutral-800"></div>
-        <button @click="searchInWiki" class="px-5 py-3 text-neutral-400 hover:text-white transition-colors">SEARCH</button>
-        <div class="w-px h-4 bg-neutral-800"></div>
-        <button v-if="!isSelectionOverlapping" @click="markAnnotation" class="px-5 py-3 text-neutral-400 hover:text-white transition-colors">MARK</button>
-        <button v-else @click="deleteOverlappingAnnotation" class="px-5 py-3 text-neutral-400 hover:text-white transition-colors">DELETE</button>
-
-        <div class="absolute left-1/2 bottom-0 transform -translate-x-1/2 translate-y-full w-0 h-0 border-l-[6px] border-r-[6px] border-t-[6px] border-transparent border-t-neutral-900"></div>
-        <div class="absolute left-1/2 bottom-[-1px] transform -translate-x-1/2 translate-y-full w-0 h-0 border-l-[7px] border-r-[7px] border-t-[7px] border-transparent border-t-neutral-800 -z-10"></div>
-      </div>
-
     </div>
 
     <div 
@@ -66,25 +57,6 @@
       </button>
     </div>
 
-    <div v-if="showAnnotationPanel" class="fixed inset-0 z-50 flex flex-col justify-end animate-fade-in">
-      <div class="absolute inset-0" @click="closeAnnotationPanel"></div>
-      
-      <div class="relative h-1/2 bg-neutral-900 border-t border-neutral-800 flex flex-col pointer-events-auto">
-        <div class="flex justify-start gap-8 px-8 py-4 border-b border-neutral-800 text-xs font-mono tracking-widest bg-neutral-900">
-           <button @click="copyText" class="text-neutral-500 hover:text-neutral-100 transition-colors outline-none focus:outline-none">COPY</button>
-           <button @click="searchInWiki" class="text-neutral-500 hover:text-neutral-100 transition-colors outline-none focus:outline-none">SEARCH</button>
-           <button v-if="!isSelectionOverlapping" @click="markAnnotation" class="text-neutral-500 hover:text-neutral-100 transition-colors outline-none focus:outline-none">MARK</button>
-           <button v-else @click="deleteOverlappingAnnotation" class="text-neutral-500 hover:text-neutral-100 transition-colors outline-none focus:outline-none">DELETE</button>
-        </div>
-        <textarea 
-          v-model="currentNoteText" 
-          @input="syncNote"
-          class="flex-1 bg-transparent p-8 outline-none text-neutral-300 resize-none" 
-          placeholder="Write something..."
-        ></textarea>
-      </div>
-    </div>
-
     <div v-if="showTocOverlay" class="fixed inset-0 bg-neutral-900 z-50 flex flex-col animate-fade-in">
       <div class="h-16 border-b border-neutral-800 flex justify-between items-center px-8">
         <button @click="showTocOverlay = false" class="text-neutral-500 hover:text-neutral-200 text-sm tracking-widest transition-colors font-mono">
@@ -110,22 +82,6 @@
       </div>
     </div>
 
-    <div v-if="showWiki" class="fixed inset-0 z-50 flex flex-col justify-end animate-fade-in">
-      <div class="absolute inset-0" @click="closeWiki"></div>
-      
-      <div class="relative h-1/2 bg-neutral-900 border-t border-neutral-800 flex flex-col pointer-events-auto">
-        <div class="flex justify-start gap-8 px-8 py-4 border-b border-neutral-800 text-xs font-mono tracking-widest bg-neutral-900">
-          <button @click="copyText" class="text-neutral-500 hover:text-neutral-100 transition-colors outline-none focus:outline-none">COPY</button>
-          <button @click="switchToAnnotation" class="text-neutral-500 hover:text-neutral-100 transition-colors outline-none focus:outline-none">ANNOTATION</button>
-          <button v-if="!isSelectionOverlapping" @click="markAnnotation" class="text-neutral-500 hover:text-neutral-100 transition-colors outline-none focus:outline-none">MARK</button>
-          <button v-else @click="deleteOverlappingAnnotation" class="text-neutral-500 hover:text-neutral-100 transition-colors outline-none focus:outline-none">DELETE</button>
-        </div>
-        <div class="flex-1 overflow-y-auto p-8">
-          <div class="wiki-content prose prose-neutral prose-invert max-w-none text-sm" v-html="wikiContent"></div>
-        </div>
-      </div>
-    </div>
-
     <audio ref="ttsPlayer" @ended="handleAudioEnded" @error="handleAudioError" class="hidden"></audio>
 
   </div>
@@ -134,6 +90,8 @@
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue';
 import ePub from 'epubjs';
+import SelectionOverlay from './SelectionOverlay.vue';
+const selectionOverlayRef = ref(null);
 
 const props = defineProps({
   book: {
@@ -143,6 +101,7 @@ const props = defineProps({
 });
 
 const emit = defineEmits(['close']);
+const clearTapTimer = () => clearTimeout(tapActionTimer);
 
 // --- DOM 引用 ---
 const viewer = ref(null);
@@ -157,12 +116,10 @@ const backendApi = '/api';
 
 // --- 界面控制状态 ---
 const showBars = ref(false);
-const showWiki = ref(false);
 const showTocOverlay = ref(false);
 const activeOverlayTab = ref('toc');
 
 // --- 数据与分页状态 ---
-const wikiContent = ref('');
 const tocList = ref([]);
 const currentPage = ref('-');
 const totalPages = ref('-');
@@ -177,24 +134,10 @@ let textNodes = [];
 let currentNodeIndex = 0;
 
 // --- ✨选词与批注专属状态 ---
-const showSelectionMenu = ref(false);
-const isSelectionOverlapping = ref(false);
-const selectionMenuPos = ref({ x: 0, y: 0 }); 
-const currentSelection = ref({ cfi: null, text: '' });
-const showAnnotationPanel = ref(false);
-const currentNoteText = ref('');
-const activeHighlightCfi = ref(null);
-const annotationDataMap = {};
-let lastClickTime = 0;   
 let isPointerDown = false; 
-let pendingSelection = null;
 let uiWasOpen = false;   
 let tapActionTimer = null;
-let overlappingCfi = null;
-let isGlobalShieldActive = false; // 护盾是否开启
-let globalShieldTimer = null;     // 护盾倒计时器
-let touchStartTime = 0;           // 记录按下瞬间的时间（用于判断长按）
-let isDragging = false;
+let lastClickTime = 0;
 
 // ==========================================
 // 主题注入：适配 Paginated 模式的流式布局
@@ -257,315 +200,179 @@ onMounted(() => {
 
 onUnmounted(() => {
   if (epubBook) {
-    epubBook.destroy();
+    epubBook.destroy(); // 销毁实例，释放内存 [cite: 2]
   }
 });
 
 const initReader = async () => {
   try {
-    epubBook = ePub(`/api/static/books/${props.book.id}/`);
+    // 1. 实例化书籍
+    epubBook = ePub(`/api/static/books/${props.book.id}/`); 
 
-    // --- 1. 离线/在线进度拉取逻辑 (保持稳定) ---
+    // 2. 进度拉取逻辑
     let savedCfi = null;
     let isReadyToSave = false;
     const progressCacheKey = `offline_progress_${props.book.id}`;
-    const syncPendingKey = `sync_pending_${props.book.id}`;
-    const needsSync = localStorage.getItem(syncPendingKey) === 'true';
-
-    if (needsSync) {
-      console.log("🔄 提交离线进度...");
-      savedCfi = localStorage.getItem(progressCacheKey);
-      try {
-        await fetch(`/api/books/${props.book.id}/progress`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'user-token': localStorage.getItem('geek_token') || '',
-            'guest-uuid': localStorage.getItem('guest_uuid') || ''
-          },
-          body: JSON.stringify({ cfi: savedCfi, percentage: 0 }) 
-        });
-        localStorage.removeItem(syncPendingKey);
-      } catch (e) {
-        console.warn("🕸️ 依然离线");
-      }
-    } else {
-      try {
-        const res = await fetch(`/api/books/${props.book.id}/progress`, {
-          headers: {
-            'user-token': localStorage.getItem('geek_token') || '',
-            'guest-uuid': localStorage.getItem('guest_uuid') || ''
-          }
-        });
-        if (res.ok) {
-          const data = await res.json();
-          savedCfi = data.cfi;
-          if (savedCfi) localStorage.setItem(progressCacheKey, savedCfi);
-          if (data.font_size) {           // ✨ 新增：读取并设置专属字号
-            currentFontSize.value = data.font_size;
-          }
-        }
-      } catch (error) {
-        savedCfi = localStorage.getItem(progressCacheKey);
-      }
-    }
-
-    if (savedCfi === 'null' || savedCfi === 'undefined') savedCfi = null;
-    //  偷偷拉取这本魔法书的藏宝图 (unit_map.json)
+    
     try {
-      const mapRes = await fetch(`/api/static/books/${props.book.id}/unit_map.json`);
-      if (mapRes.ok) {
-        unitMap = await mapRes.json();
-        console.log("🗺️ 藏宝图获取成功！包含章节数:", unitMap.length);
+      const res = await fetch(`/api/books/${props.book.id}/progress`, {
+        headers: {
+          'user-token': localStorage.getItem('geek_token') || '',
+          'guest-uuid': localStorage.getItem('guest_uuid') || ''
+        }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        savedCfi = data.cfi;
+        if (data.font_size) currentFontSize.value = data.font_size;
       }
     } catch (e) {
-      console.warn("⚠️ 未找到藏宝图");
+      // 联网失败则读取本地缓存 [cite: 5]
+      savedCfi = localStorage.getItem(progressCacheKey);
     }
-    // --- 2. 阅读器渲染初始化 ---
+
+    // 拉取 unit_map.json (用于 unit-X 坐标的精准转换)
+    try {
+      const mapRes = await fetch(`/api/static/books/${props.book.id}/unit_map.json`);
+      if (mapRes.ok) unitMap = await mapRes.json();
+    } catch (e) { 
+      console.warn("⚠️ 未找到 unit_map.json"); 
+    }
+
+    // 3. 阅读器渲染配置 [cite: 2]
     rendition = epubBook.renderTo(viewer.value, {
-      width: '100%',
-      height: '100%',
-      flow: 'paginated', // 强制横向分页模式
+      width: '100%', 
+      height: '100%', 
+      flow: 'paginated', 
       manager: 'default',
-      spread: 'none',
+      spread: 'none',      
       allowScriptedContent: true
     });
 
-    // 🎨 应用极简黑白灰主题 (无需再写 hooks 拦截器)
-    applyTheme();
-    rendition.themes.fontSize(`${currentFontSize.value}%`);  // ✨ 确保在 display 渲染前，先设置好拿到的字号
-    // --- ✨ 新增：注入 iframe 底层原生守卫 ---
+    applyTheme(); // 应用黑白灰主题
+    rendition.themes.fontSize(`${currentFontSize.value}%`);
+
+    // 4. Iframe 内部事件拦截：交给子组件 SelectionOverlay 处理 [cite: 2]
     rendition.on('rendered', (e, iframe) => {
       const doc = iframe.document;
-
-      doc.addEventListener('touchmove', () => { 
-        isDragging = true; 
-      }, { passive: true });
-      
-      doc.addEventListener('mousemove', () => { 
-        isDragging = true; 
-      }, { passive: true });
-
       doc.addEventListener('selectionchange', () => {
         const selection = iframe.window.getSelection();
-        if (isPointerDown && Date.now() - touchStartTime < 300 && !isDragging) {
-           if (selection && !selection.isCollapsed) {
-               selection.removeAllRanges();
-               return; // 瞬间拦截，不往下走了
-           }
-        }
         if (!selection || selection.isCollapsed || selection.toString().trim() === '') {
-          // 这里太频繁了就不打日志了
-          showSelectionMenu.value = false;
-          pendingSelection = null;
-        } else {
-          showSelectionMenu.value = false; 
+          selectionOverlayRef.value?.hideMenuOnly();
         }
       });
 
       const finalizeSelection = () => {
         isPointerDown = false;
-        setTimeout(() => {
-          if (pendingSelection) {
-            selectionMenuPos.value = pendingSelection.pos;
-            currentSelection.value = { ...pendingSelection };
-            showSelectionMenu.value = true;
-            pendingSelection = null;
-          }
-        }, 50); 
+        setTimeout(() => { selectionOverlayRef.value?.showPendingMenu(); }, 50);
       };
-
-      // 🚀 新增：光标拖拽结束侦测器
-      const handleHandleDragEnd = () => {
-        const selection = iframe.window.getSelection();
-        // 如果手指离开时，原生选区还在，说明用户刚拉完光标！
-        if (selection && !selection.isCollapsed && selection.toString().trim() !== '') {
-          const contents = rendition.getContents()[0];
-          if (contents) {
-            try {
-              const range = selection.getRangeAt(0);
-              // 利用 epubjs 内部方法，把原生 range 重新转成你需要的 cfiRange
-              const cfiRange = contents.cfiFromRange(range); 
-              if (cfiRange) {
-                // 主动喂给你的核心处理逻辑，重新计算坐标和文本！
-                handleSelection(cfiRange, contents); 
-              }
-            } catch(err) {
-              console.warn("光标转换失败", err);
-            }
-          }
-        }
-        finalizeSelection();
-      };
-
-      // ⚠️ 替换掉你原有的 touchend / mouseup 监听
-      doc.addEventListener('touchend', handleHandleDragEnd);
-      doc.addEventListener('mouseup', handleHandleDragEnd);
+      doc.addEventListener('touchend', finalizeSelection);
+      doc.addEventListener('mouseup', finalizeSelection);
     });
 
-// --- 3. 🚀 极速渲染与一键空降 (极简重构版) ---
-let targetLocation = savedCfi;
-let initialPageNumber = 0;
+    // 5. 计算初始空降位置
+    let targetLocation = savedCfi;
+    let initialPageNumber = 0;
 
-// 🎯 核心逻辑：仅识别 unit-X 格式。不再计算百分比，不再兼容旧分隔符
-if (savedCfi && savedCfi.startsWith('unit-') && unitMap.length > 0) {
-  const targetUnitId = parseInt(savedCfi.split('-')[1], 10);
-  initialPageNumber = targetUnitId; 
-  
-  // 从地图中检索该单元所属的物理文件 (href)
-  const mapItem = unitMap.find(m => targetUnitId >= m.start && targetUnitId <= m.end);
-  if (mapItem) {
-    // 拼接成 Epub.js 识别的锚点格式：chapter1.xhtml#unit-145
-    targetLocation = `${mapItem.href}#${savedCfi}`;
-  }
-}
+    // 核心跳转逻辑：如果是 unit-X 格式，根据 map 映射到具体文件锚点
+    if (savedCfi && savedCfi.startsWith('unit-') && unitMap.length > 0) {
+      const targetUnitId = parseInt(savedCfi.split('-')[1], 10);
+      initialPageNumber = targetUnitId; 
+      const mapItem = unitMap.find(m => targetUnitId >= m.start && targetUnitId <= m.end);
+      if (mapItem) targetLocation = `${mapItem.href}#${savedCfi}`;
+    }
 
-// ✨ 状态灌注：直接同步 UI，不再通过函数中转
-currentPage.value = initialPageNumber;
-inputPage.value = initialPageNumber;
-totalPages.value = props.book.total_units || '-';
+    // 同步 UI 状态
+    currentPage.value = initialPageNumber;
+    inputPage.value = initialPageNumber;
+    totalPages.value = props.book.total_units || '-';
 
-try {
-  // 执行空降
-  await rendition.display(targetLocation || undefined);
-} catch (error) {
-  console.warn("⚠️ 坐标失效，强制回滚至起点", error);
-  localStorage.removeItem(`offline_progress_${props.book.id}`);
-  await rendition.display(); 
-}
+    // 执行展示
+    await rendition.display(targetLocation || undefined);
+    if (viewer.value) viewer.value.classList.add('animate-fade-in');
+    
+    // 延迟 500ms 激活雷达，防止初始化时的虚假跳转触发重复保存
+    setTimeout(() => { isReadyToSave = true; }, 500);
 
-// 动画与雷达激活
-if (viewer.value) viewer.value.classList.add('animate-fade-in');
-
-setTimeout(() => {
-  isReadyToSave = true; // 落地 500ms 后才允许雷达扫描存档，防止初始化跳变
-  console.log("🚀 渲染彻底完成，雷达已锁定精准信标");
-}, 500);
-
-    // --- 4. ⚡️ 极简进度雷达：监听翻页，寻找 unit-X ---
+    // 6. 进度雷达：监听翻页并寻找 unit-X 锚点 [cite: 2]
     rendition.on('relocated', (location) => {
-      if (!location) return;
-      if (!isReadyToSave) return; // 防治初始化虚假翻页
-      if (isJumpLocked) {         // 🛡️ 500ms 盾生效，拦截跳转后的余震/二次触发
-        console.log("🛡️ 500ms盾生效中，已拦截二次提交");
-        return;
-      }
-
+      if (!location || !isReadyToSave || isJumpLocked) return;
+      
       try {
         const contents = rendition.getContents()[0];
         const iframeDoc = contents.document;
-        
-        // 核心突破：获取 Iframe 的屏幕绝对偏移量
         const iframe = iframeDoc.defaultView.frameElement;
         const iframeOffset = iframe.getBoundingClientRect().left; 
         const viewWidth = window.innerWidth;
         
-        // 直接寻找后端注入的雷达信标
         const targets = Array.from(iframeDoc.querySelectorAll('.sync-anchor'));
-        let foundElement = null;
-
-        for (let el of targets) {
+        let foundElement = targets.find(el => {
           const rect = el.getBoundingClientRect();
           const absoluteLeft = rect.left + iframeOffset;
-          
-          // 容错率 -10，寻找当前屏幕左侧第一个出现的信标
-          if (absoluteLeft >= -10 && absoluteLeft < viewWidth) {
-            foundElement = el;
-            break; 
-          }
-        }
+          return absoluteLeft >= -10 && absoluteLeft < viewWidth;
+        });
 
         if (foundElement) {
-          const preciseId = foundElement.id; // 例如: unit-145
-          
-          // 🎯 1. 计算绝对百分比进度
+          const preciseId = foundElement.id; 
           const unitMatch = preciseId.match(/unit-(\d+)/);
           const total = props.book.total_units || 1; 
-          let progress = 0;
 
           if (unitMatch) {
             const currentUnit = parseInt(unitMatch[1]);
-            progress = currentUnit / total;
-            
             currentPage.value = currentUnit;
-            totalPages.value = total;
             inputPage.value = currentUnit;
-          } else {
-            progress = location.start.percentage || 0;
+            saveProgressToBackend(preciseId, currentUnit / total); 
           }
-
-          // 🎯 2. 极致瘦身：只存 unit-xxxx！彻底抛弃原生 CFI
-          console.log(`🎯 [雷达锁定] 绝对单元: ${preciseId}, 进度: ${(progress*100).toFixed(2)}%`);
-          
-          // 直接将 "unit-145" 传给后端和本地，清爽无比！
-          saveProgressToBackend(preciseId, progress); 
-        } else {
-          console.warn("⚠️ 视野内未发现预处理信标");
         }
       } catch (e) {
-        console.error("💥 [雷达程序崩溃]:", e);
+        console.error("💥 雷达程序崩溃:", e);
       }
     });
 
-    // 绑定交互事件
-    rendition.on('selected', handleSelection);
+    // 7. 绑定划词事件
+    rendition.on('selected', (cfiRange, contents) => {
+      const text = rendition.getRange(cfiRange).toString().trim();
+      if (!text) return;
+      const range = contents.window.getSelection().getRangeAt(0);
+      // 调用解耦后的子组件进行坐标计算和菜单显示
+      selectionOverlayRef.value?.processSelection(cfiRange, text, range, contents, isPointerDown);
+    });
+
+    // 8. 绑定点击交互
     setupIframeClick();
 
   } catch (err) {
-    console.error("💥 阅读器初始化崩溃:", err);
+    console.error("💥 阅读器初始化失败:", err);
   }
 };
 // ==========================================
 // 2. 交互与布局控制 (极致简化版)
 // ==========================================
-const activateGlobalShield = (duration = 400) => {
-  isGlobalShieldActive = true;
-  clearTimeout(globalShieldTimer); // 重新计算时间，防止多次连续触发导致时间错乱
-  globalShieldTimer = setTimeout(() => {
-    isGlobalShieldActive = false;
-  }, duration);
-};
 // iframe 内部点击监听
 const setupIframeClick = () => {
   let startX = 0;
   let startY = 0;
 
   const recordStart = (e) => {
-    if (isGlobalShieldActive) return; // 🛡️ 护盾开启时，彻底无视按压
-    touchStartTime = Date.now(); // ⏱️ 记录按下时间
-    isDragging = false;
     isPointerDown = true;
-    pendingSelection = null;
+      // ✨ 向子组件查询：当前是否有任何菜单处于打开状态？
+      uiWasOpen = showBars.value || showTocOverlay.value || selectionOverlayRef.value?.isAnyUIOpen();
+      
+      selectionOverlayRef.value?.hideMenuOnly(); // 点按瞬间强行闭合所有UI
 
-    // ⚡ 修复 1：在清空任何 UI 前，先拍一张“快照”
-    // 如果手指按下去的时候，屏幕上有任何菜单/面板，就标记为 true
-    uiWasOpen = showBars.value || showSelectionMenu.value || showTocOverlay.value || showWiki.value || showAnnotationPanel.value;
-
-    showSelectionMenu.value = false; 
-
-    const event = e.changedTouches ? e.changedTouches[0] : e;
-    startX = event.clientX;
-    startY = event.clientY;
+      const event = e.changedTouches ? e.changedTouches[0] : e;
+      startX = event.clientX;
+      startY = event.clientY;
   };
 
   const handlePointerUp = (e) => {
-    const costTime = Date.now() - touchStartTime;
-    if (isGlobalShieldActive) return;
     isPointerDown = false; 
-    if (pendingSelection) {
-      setTimeout(() => {
-        if (pendingSelection) {
-          selectionMenuPos.value = pendingSelection.pos;
-          currentSelection.value = { ...pendingSelection };
-          showSelectionMenu.value = true;
-          pendingSelection = null;
-        }
-      }, 50);
-    }
+    // ✨ 触控结束，告诉子组件：如果是拖拽选词结束，可以把挂起的选单弹出来了
+    setTimeout(() => {
+      selectionOverlayRef.value?.showPendingMenu();
+    }, 50);
     const now = Date.now();
-    if (now - lastClickTime < 300) {
-      return; 
-    }
+    if (now - lastClickTime < 300) return; 
     lastClickTime = now;
 
     const event = e.changedTouches ? e.changedTouches[0] : e;
@@ -580,49 +387,32 @@ const setupIframeClick = () => {
     if (uiWasOpen) {
       showBars.value = false;
       showTocOverlay.value = false;
-      showWiki.value = false;
-      showAnnotationPanel.value = false;
       
       const contents = rendition.getContents()[0];
       if (contents) contents.window.getSelection().removeAllRanges();
       return; 
     }
 
-    if (deltaX > 10 || deltaY > 10) {
-      return;
-    }
+    if (deltaX > 10 || deltaY > 10) return;
 
     const contents = rendition.getContents()[0];
     const selection = contents ? contents.window.getSelection() : null;
-    if (costTime < 400) {
-      if (selection) selection.removeAllRanges();
-    } else {
-      if (selection && !selection.isCollapsed && selection.toString().trim().length > 0) {
-        return; 
-      }
-    }
+    if (selection && !selection.isCollapsed && selection.toString().trim().length > 0) return;
+
     // ⚡ 修复 2：给“翻页/呼出菜单”加上 80ms 的生死时速延迟！
     // 为什么？为了让 Epub.js 有时间去触发“点击了高亮块”的事件
     clearTimeout(tapActionTimer);
     tapActionTimer = setTimeout(() => {
       const screenWidth = window.innerWidth;
       const realX = endX % screenWidth; 
-      let isPageTurned = false; 
-
       if (realX < screenWidth * 0.3) {
         rendition.prev();
-        isPageTurned = true;
       } else if (realX > screenWidth * 0.7) {
         rendition.next();
-        isPageTurned = true;
       } else {
-        showBars.value = !showBars.value;
+        showBars.value = !showBars.value; 
       }
-
-      if (isPageTurned) {
-        activateGlobalShield(400);
-      }
-    }, 80); 
+    }, 80); // 80ms 对人类视觉是毫无延迟感的
   };
 
   rendition.on('mousedown', recordStart);
@@ -633,23 +423,16 @@ const setupIframeClick = () => {
 
 // 外层触控蒙版监听
 const handleTouch = (event) => {
-  if (isGlobalShieldActive) return;
   const rect = readerMain.value.getBoundingClientRect();
   const clickX = event.clientX - rect.left;
   const width = rect.width;
-  if (showTocOverlay.value || showWiki.value) return;
-  let isPageTurned = false;
+  if (showTocOverlay.value || selectionOverlayRef.value?.isAnyUIOpen()) return;
   if (clickX < width * 0.3) {
     rendition.prev();
-    isPageTurned = true;
   } else if (clickX > width * 0.7) {
     rendition.next();
-    isPageTurned = true;
   } else {
     showBars.value = !showBars.value;
-  }
-  if (isPageTurned) {
-    activateGlobalShield(400);
   }
 };
 
@@ -683,298 +466,42 @@ const jumpToCfiAndClose = (cfiOrHref) => {
 // ==========================================
 // 3. 选词高亮与维基反代加载
 // ==========================================
-// ⚡ 核心提取引擎：将选区拆解为 [{nodeX, start, end}, ...] 的标准数组
-const extractSegments = (range, doc) => {
-  const segmentsMap = {};
-  
-  // 🐛 核心修复1：解决同段落划线时，祖先节点为纯文本导致无法遍历的 Bug
-  let root = range.commonAncestorContainer;
-  if (root.nodeType === 3) {
-    root = root.parentNode; // 强行提升到包裹它的 HTML 标签（如 <p> 或 <div>）
-  }
 
-  const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-  let currentNode;
+const handleRelocated = (location) => {
+  try {
+    const contents = rendition.getContents()[0];
+    const iframe = contents.document.defaultView.frameElement;
+    const iframeOffset = iframe.getBoundingClientRect().left; 
+    const targets = Array.from(contents.document.querySelectorAll('.sync-anchor'));
+    let found = targets.find(el => {
+      const rect = el.getBoundingClientRect();
+      const absLeft = rect.left + iframeOffset;
+      return absLeft >= -10 && absLeft < window.innerWidth;
+    });
 
-  while ((currentNode = walker.nextNode())) {
-    // 只处理在选区内的文本节点
-    if (!range.intersectsNode(currentNode)) continue;
-
-    // 🎯 完美复刻你原本的提取逻辑：向上寻找最近的 [id]
-    const targetEl = currentNode.parentElement ? currentNode.parentElement.closest('[id]') : null;
-    if (!targetEl) continue;
-
-    const nodeId = targetEl.id;
-
-    // 📏 完全使用你最开始写的克隆 Range 算长度法
-    const preRange = doc.createRange();
-    preRange.selectNodeContents(targetEl);
-    // 把截断点设为当前小文本节点的头部
-    preRange.setEnd(currentNode, 0); 
-    const prefixLen = preRange.toString().length;
-
-    // 计算选区在这个特定文本节点上的起止点
-    let start = currentNode === range.startContainer ? range.startOffset : 0;
-    let end = currentNode === range.endContainer ? range.endOffset : currentNode.length;
-    
-    // 过滤掉选区边缘的空截断
-    if (start === end) continue;
-
-    // 绝对偏移量 = 前面所有兄弟文本的长度 + 自己内部的偏移量
-    const blockStart = prefixLen + start;
-    const blockEnd = prefixLen + end;
-
-    // 存入或自动合并跨标签的段落数据
-    if (!segmentsMap[nodeId]) {
-      segmentsMap[nodeId] = { nodeX: nodeId, startOffset: blockStart, endOffset: blockEnd };
-    } else {
-      segmentsMap[nodeId].startOffset = Math.min(segmentsMap[nodeId].startOffset, blockStart);
-      segmentsMap[nodeId].endOffset = Math.max(segmentsMap[nodeId].endOffset, blockEnd);
+    if (found) {
+      const unitMatch = found.id.match(/unit-(\d+)/);
+      if (unitMatch) {
+        const currentUnit = parseInt(unitMatch[1]);
+        currentPage.value = currentUnit;
+        inputPage.value = currentUnit;
+        saveProgressToBackend(found.id, currentUnit / (props.book.total_units || 1));
+      }
     }
-  }
-  
-  return Object.values(segmentsMap);
+  } catch (e) { console.error("Radar Error", e); }
 };
 
 const handleSelection = (cfiRange, contents) => {
-  
-  if (isGlobalShieldActive) {
-    contents.window.getSelection().removeAllRanges();
-    return;
-  }
-  
-  const costTime = Date.now() - touchStartTime;
-  if (costTime < 400 && !isDragging) {
-    contents.window.getSelection().removeAllRanges();
-    return;
-  }
-
   if (showBars.value) {
     contents.window.getSelection().removeAllRanges();
     return;
   }
-  
   const text = rendition.getRange(cfiRange).toString().trim();
   if (!text) return;
-
   const range = contents.window.getSelection().getRangeAt(0);
-  
-  // 1. ✨ 用新引擎提取当前选区的精准坐标组
-  const currentSegments = extractSegments(range, contents.document);
-
-  // 2. ✨ 纯数据碰撞检测 (取代之前的 DOM 检测)
-  isSelectionOverlapping.value = false;
-  overlappingCfi = null;
-
-  for (const [savedCfi, savedData] of Object.entries(annotationDataMap)) {
-    // 只要有任意一段 nodeX 相同，且线段有交集，就算作碰撞！
-    const isOverlap = currentSegments.some(currSeg => {
-      return savedData.segments.some(savedSeg => {
-        if (currSeg.nodeX !== savedSeg.nodeX) return false;
-        // 核心数学：两线段相交的条件是 max(起点) < min(终点)
-        return Math.max(currSeg.startOffset, savedSeg.startOffset) < Math.min(currSeg.endOffset, savedSeg.endOffset);
-      });
-    });
-
-    if (isOverlap) {
-      isSelectionOverlapping.value = true;
-      overlappingCfi = savedCfi;
-      break;
-    }
-  }
-
-  // 计算菜单弹出的物理位置 (保持不变)
-  const rect = range.getBoundingClientRect();
-  const iframe = contents.document.defaultView.frameElement;
-  const iframeRect = iframe.getBoundingClientRect();
-  const pos = { 
-    x: rect.left + iframeRect.left + (rect.width / 2), 
-    y: rect.top + iframeRect.top 
-  };
-
-  // 3. ✨ 组装全新的纯净数据包
-  const selectionData = {
-    cfi: cfiRange, // cfi 仅作给 epubjs 绘图用的身份证
-    text: text, 
-    pos: pos, 
-    segments: currentSegments // 👈 存入刚刚提取的精美数组！
-  };
-
-  if (isPointerDown) {
-    pendingSelection = selectionData;
-  } else {
-    selectionMenuPos.value = pos;
-    currentSelection.value = selectionData;
-    showSelectionMenu.value = true;
-  }
+  // ✨ 转发给子组件处理
+  selectionOverlayRef.value?.processSelection(cfiRange, text, range, contents, isPointerDown);
 };
-
-const closeSelection = () => {
-  showSelectionMenu.value = false;
-  if (rendition) {
-    const contents = rendition.getContents()[0];
-    if (contents) contents.window.getSelection().removeAllRanges(); // 取消原生的蓝色选区
-  }
-};
-const clearNativeSelection = () => {
-  if (rendition) {
-    const contents = rendition.getContents()[0];
-    if (contents) contents.window.getSelection().removeAllRanges();
-  }
-};
-const closeWiki = () => {
-  showWiki.value = false;
-  clearNativeSelection(); // ✨ 退出 Wiki 时，清除原生的蓝色高亮
-};
-
-const closeAnnotationPanel = () => {
-  showAnnotationPanel.value = false;
-  clearNativeSelection(); // ✨ 退出 批注面板 时，也清除蓝色高亮
-  // TODO: 后续可在这里触发后端保存接口
-};
-
-const deleteOverlappingAnnotation = () => {
-  if (overlappingCfi) {
-    rendition.annotations.remove(overlappingCfi, 'highlight');
-    delete annotationDataMap[overlappingCfi];
-    
-    isSelectionOverlapping.value = false;
-    overlappingCfi = null;
-    activeHighlightCfi.value = null; 
-    
-    currentNoteText.value = ''; 
-    
-    showSelectionMenu.value = false; 
-    showAnnotationPanel.value = false; 
-    clearNativeSelection(); 
-  }
-};
-
-const syncNote = () => {
-  // ✨ 核心机制：只要还没 MARK，只要你敲下第一个字母，系统立刻自动帮你执行 MARK！
-  // 这样底层的蓝色高亮会瞬间变成灰色的持久高亮，完美实现“打字即标记”
-  if (!isSelectionOverlapping.value) {
-    markAnnotation(); 
-  }
-  
-  // 此时绝对已经是已 MARK 状态了，安全地实时同步笔记文本
-  if (overlappingCfi && annotationDataMap[overlappingCfi]) {
-    annotationDataMap[overlappingCfi].note = currentNoteText.value;
-  }
-};
-const copyText = () => {
-  if (currentSelection.value && currentSelection.value.text) {
-    navigator.clipboard.writeText(currentSelection.value.text);
-    if (!showWiki.value && !showAnnotationPanel.value) {
-      showSelectionMenu.value = false;
-      clearNativeSelection(); // 复制完，选单和高亮全消失
-    }
-  }
-};
-
-const searchInWiki = () => {
-  if (currentSelection.value && currentSelection.value.text) {
-    showSelectionMenu.value = false; // 仅仅关闭浮动选项框
-    showAnnotationPanel.value = false; 
-    summonReference(currentSelection.value.text);
-    // 🎯 注意：这里故意不调用 clearNativeSelection()，所以蓝色高亮会完美保留！
-  }
-};
-
-const switchToAnnotation = () => {
-  showSelectionMenu.value = false; // 仅仅关闭浮动选项框
-  showWiki.value = false;
-  currentNoteText.value = isSelectionOverlapping.value && overlappingCfi ? (annotationDataMap[overlappingCfi]?.note || '') : '';
-  showAnnotationPanel.value = true;
-  // 🎯 注意：这里也不调用 clearNativeSelection()，保留蓝色高亮
-};
-
-
-const markAnnotation = () => {
-  const cfi = currentSelection.value.cfi;
-  
-  if (!annotationDataMap[cfi]) {
-    annotationDataMap[cfi] = {
-      text: currentSelection.value.text,
-      segments: currentSelection.value.segments, 
-      note: currentNoteText.value 
-    };
-  } else {
-    annotationDataMap[cfi].note = currentNoteText.value;
-  }
-
-  isSelectionOverlapping.value = true;
-  overlappingCfi = cfi;
-  activeHighlightCfi.value = cfi;
-
-  rendition.annotations.add(
-    'highlight', 
-    cfi, 
-    {}, 
-    (e) => {
-      const contents = rendition.getContents()[0];
-      const selection = contents ? contents.window.getSelection() : null;
-      if (selection && !selection.isCollapsed && selection.toString().trim().length > 0) return;
-
-      clearTimeout(tapActionTimer);
-      isSelectionOverlapping.value = true;
-      overlappingCfi = cfi;
-      activeHighlightCfi.value = cfi;
-      currentSelection.value = { 
-        text: annotationDataMap[cfi].text, 
-        cfi: cfi,
-        segments: annotationDataMap[cfi].segments
-      };
-
-      currentNoteText.value = annotationDataMap[cfi].note || '';     
-      showAnnotationPanel.value = true;
-    }, 
-    'custom-hl', 
-    { "fill": "#808080", "fill-opacity": "0.3", "mix-blend-mode": "multiply" } 
-  );
-  
-  showSelectionMenu.value = false; // 隐藏小浮窗
-  clearNativeSelection(); // 🎯 MARK 之后，取消原生的蓝色选区，让底下的灰色专属高亮无缝显现出来！
-};
-
-// --- ✨ 3. 升级：标准化的关闭动作 ---
-
-const copyActiveAnnotation = () => {
-  const data = annotationDataMap[activeHighlightCfi.value];
-  if (data) {
-    navigator.clipboard.writeText(data.text);
-    // 可选：加个轻微反馈
-  }
-};
-
-const searchActiveAnnotation = () => {
-  const data = annotationDataMap[activeHighlightCfi.value];
-  if (data) {
-    showAnnotationPanel.value = false; // 关闭批注栏
-    summonReference(data.text);        // 弹起维基半屏
-  }
-};
-
-const deleteAnnotation = () => {
-  rendition.annotations.remove(activeHighlightCfi.value, 'highlight');
-  delete annotationDataMap[activeHighlightCfi.value]; // 🧹 打扫卫生
-  showAnnotationPanel.value = false;
-};
-
-const summonReference = async (query) => {
-  showWiki.value = true;
-  wikiContent.value = '<p class="text-neutral-500 font-mono text-center mt-10">⏳ Connecting to portal...</p>';
-  
-  setTimeout(() => {
-    wikiContent.value = `
-      <h1 class="text-2xl text-neutral-100 mb-4">${query}</h1>
-      <p class="text-neutral-300 leading-relaxed">
-        这是从后端拉取的 <strong>${query}</strong> 的解释。
-      </p>
-    `;
-  }, 800);
-};
-
 // ==========================================
 // 4. 分页与排版 (秒开极简版)
 // ==========================================
