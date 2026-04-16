@@ -101,7 +101,13 @@ const props = defineProps({
 });
 
 const emit = defineEmits(['close']);
-const clearTapTimer = () => clearTimeout(tapActionTimer);
+const clearTapTimer = () => {
+  clearTimeout(tapActionTimer); // 兼顾电脑端（拆已有的炸弹）
+  tapLock = true;               // 兼顾手机端（给接下来冒泡上来的事件上锁）
+  
+  // 400ms 后自动解锁，期间所有试图翻页或呼出上下栏的操作全部作废
+  setTimeout(() => { tapLock = false; }, 400); 
+};
 
 // --- DOM 引用 ---
 const viewer = ref(null);
@@ -138,6 +144,7 @@ let isPointerDown = false;
 let uiWasOpen = false;   
 let tapActionTimer = null;
 let lastClickTime = 0;
+let tapLock = false;
 
 // ==========================================
 // 主题注入：适配 Paginated 模式的流式布局
@@ -258,14 +265,41 @@ const initReader = async () => {
       doc.addEventListener('selectionchange', () => {
         const selection = iframe.window.getSelection();
         if (!selection || selection.isCollapsed || selection.toString().trim() === '') {
-          selectionOverlayRef.value?.hideMenuOnly();
+          // selectionOverlayRef.value?.hideMenuOnly();
         }
       });
 
       const finalizeSelection = () => {
         isPointerDown = false;
-        setTimeout(() => { selectionOverlayRef.value?.showPendingMenu(); }, 50);
+        // 给 iOS 系统的原生自动扩选（比如单词自动扩充到整句）留出 150ms 的时间
+        setTimeout(() => {
+          const contents = rendition.getContents()[0];
+          if (!contents) return;
+
+          const selection = contents.window.getSelection();
+          
+          // 判读此时此刻，屏幕上是否有完整、确定的原生蓝色选区？
+          if (selection && !selection.isCollapsed && selection.toString().trim() !== '') {
+            const range = selection.getRangeAt(0);
+            const text = selection.toString().trim();
+            
+            try {
+              // 主动出击：根据目前最终的 DOM 选区，自己当场生成最新的 CFI 坐标
+              const finalCfi = contents.cfiFromRange(range);
+              
+              // 直接传 false，强制触发画“临时高亮”和“逼退原生菜单”的狸猫换太子逻辑！
+              selectionOverlayRef.value?.processSelection(finalCfi, text, range, contents, false);
+            } catch (err) {
+              console.warn("最新选区获取失败，降级使用缓存数据");
+              selectionOverlayRef.value?.showPendingMenu();
+            }
+          } else {
+            // 如果没选区，说明可能只是一次普通的点击，安全释放可能挂起的菜单
+            selectionOverlayRef.value?.showPendingMenu();
+          }
+        }, 150); 
       };
+
       doc.addEventListener('touchend', finalizeSelection);
       doc.addEventListener('mouseup', finalizeSelection);
     });
@@ -335,7 +369,7 @@ const initReader = async () => {
       if (!text) return;
       const range = contents.window.getSelection().getRangeAt(0);
       // 调用解耦后的子组件进行坐标计算和菜单显示
-      selectionOverlayRef.value?.processSelection(cfiRange, text, range, contents, isPointerDown);
+      selectionOverlayRef.value?.processSelection(cfiRange, text, range, contents, true);
     });
 
     // 8. 绑定点击交互
@@ -366,11 +400,8 @@ const setupIframeClick = () => {
   };
 
   const handlePointerUp = (e) => {
-    isPointerDown = false; 
-    // ✨ 触控结束，告诉子组件：如果是拖拽选词结束，可以把挂起的选单弹出来了
-    setTimeout(() => {
-      selectionOverlayRef.value?.showPendingMenu();
-    }, 50);
+    isPointerDown = false;
+    if (tapLock) return;
     const now = Date.now();
     if (now - lastClickTime < 300) return; 
     lastClickTime = now;
@@ -387,7 +418,7 @@ const setupIframeClick = () => {
     if (uiWasOpen) {
       showBars.value = false;
       showTocOverlay.value = false;
-      
+
       const contents = rendition.getContents()[0];
       if (contents) contents.window.getSelection().removeAllRanges();
       return; 

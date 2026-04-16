@@ -1,4 +1,14 @@
 <template>
+  <Teleport to="body">
+    <div 
+      v-if="isGlobalShieldActive" 
+      class="fixed inset-0 z-[99999] bg-transparent" 
+      style="touch-action: none;"
+      @click.stop.prevent
+      @touchstart.stop.prevent
+      @touchend.stop.prevent
+    ></div>
+  </Teleport>
   <div
     v-if="showSelectionMenu"
     class="absolute z-50 bg-neutral-900 border border-neutral-800 shadow-2xl flex items-center font-mono text-xs tracking-widest animate-fade-in"
@@ -75,10 +85,27 @@ const wikiContent = ref('');
 
 const annotationDataMap = reactive({});
 const activeHighlightCfi = ref(null);
+const tempHighlightCfi = ref(null);
+const isGlobalShieldActive = ref(false);
 
 let pendingSelection = null;
 let overlappingCfi = null;
+let panelOpenTime = 0;
 
+const triggerTouchShield = () => {
+  isGlobalShieldActive.value = true;
+  // 450ms 刚好熬死所有的 CSS 动画时间和 iOS 幽灵点击延迟
+  setTimeout(() => {
+    isGlobalShieldActive.value = false;
+  }, 450); 
+};
+// ✨ 新增：清理临时高亮的辅助函数
+const clearTempHighlight = () => {
+  if (tempHighlightCfi.value && props.rendition) {
+    props.rendition.annotations.remove(tempHighlightCfi.value, 'highlight');
+    tempHighlightCfi.value = null;
+  }
+};
 // --- 核心方法：提取选中坐标 (原封不动) ---
 const extractSegments = (range, doc) => {
   const segmentsMap = {};
@@ -123,7 +150,7 @@ const processSelection = (cfiRange, text, range, contents, isPointerDown) => {
   isSelectionOverlapping.value = false;
   overlappingCfi = null;
 
-  // 碰撞检测
+  // 1. 碰撞检测 (保持原样不动)
   for (const [savedCfi, savedData] of Object.entries(annotationDataMap)) {
     const isOverlap = currentSegments.some(currSeg => {
       return savedData.segments.some(savedSeg => {
@@ -138,7 +165,7 @@ const processSelection = (cfiRange, text, range, contents, isPointerDown) => {
     }
   }
 
-  // 计算物理位置
+  // 2. 计算物理位置 (保持原样不动)
   const rect = range.getBoundingClientRect();
   const iframe = contents.document.defaultView.frameElement;
   const iframeRect = iframe.getBoundingClientRect();
@@ -149,27 +176,58 @@ const processSelection = (cfiRange, text, range, contents, isPointerDown) => {
 
   const selectionData = { cfi: cfiRange, text: text, pos: pos, segments: currentSegments };
 
+  // 3. 核心分发逻辑
   if (isPointerDown) {
+    // 如果手指还按在屏幕上拖拽，只需挂起数据，千万不要清空选区，否则拖拽会中断
     pendingSelection = selectionData;
   } else {
+    // 💡 手指抬起，准备显示自定义菜单
     selectionMenuPos.value = pos;
     currentSelection.value = selectionData;
+
+    // ✨ 狸猫换太子：如果没有重叠已有的高亮，绘制“临时高亮”底色
+    if (!isSelectionOverlapping.value) {
+      props.rendition.annotations.add(
+        'highlight', cfiRange, {}, null, 'temp-hl', 
+        { "fill": "#525252", "fill-opacity": "0.4" } // 与 ::selection 类似的深灰底色
+      );
+      // 记录 CFI，稍后关闭菜单时需要用 clearTempHighlight() 清除它
+      tempHighlightCfi.value = cfiRange;
+    }
+
+    // ✨ 绝杀：瞬间清空原生选区，迫使 iOS 放弃弹出系统拷贝菜单！
+    contents.window.getSelection().removeAllRanges();
+
+    // 最后再弹出我们自己的极简菜单
     showSelectionMenu.value = true;
   }
 };
-
 // --- 对外暴露的通信接口 2：释放挂起的选区 ---
 const showPendingMenu = () => {
   if (pendingSelection) {
+    triggerTouchShield();
     selectionMenuPos.value = pendingSelection.pos;
     currentSelection.value = { ...pendingSelection };
+    
+    // ✨ 拖拽结束释放选区时的狸猫换太子
+    if (!isSelectionOverlapping.value) {
+      props.rendition.annotations.add(
+        'highlight', pendingSelection.cfi, {}, null, 'temp-hl', 
+        { "fill": "#525252", "fill-opacity": "0.4" } 
+      );
+      tempHighlightCfi.value = pendingSelection.cfi;
+    }
+    clearNativeSelection(); // 强制逼退 iOS 菜单
+
     showSelectionMenu.value = true;
     pendingSelection = null;
   }
 };
+
 const hideMenuOnly = () => {
   showSelectionMenu.value = false;
   pendingSelection = null;
+  clearTempHighlight();
 };
 // --- 对外暴露的通信接口 3：一键闭合与状态探针 ---
 const closeAll = () => {
@@ -178,6 +236,7 @@ const closeAll = () => {
   showWiki.value = false;
   pendingSelection = null;
   clearNativeSelection();
+  clearTempHighlight();
 };
 
 const isAnyUIOpen = () => {
@@ -198,6 +257,8 @@ const closeWiki = () => {
 };
 
 const closeAnnotationPanel = () => {
+  if (Date.now() - panelOpenTime < 400) return;
+  triggerTouchShield();
   showAnnotationPanel.value = false;
   clearNativeSelection(); 
 };
@@ -231,6 +292,7 @@ const copyText = () => {
     if (!showWiki.value && !showAnnotationPanel.value) {
       showSelectionMenu.value = false;
       clearNativeSelection(); 
+      clearTempHighlight();
     }
   }
 };
@@ -239,11 +301,13 @@ const searchInWiki = () => {
   if (currentSelection.value && currentSelection.value.text) {
     showSelectionMenu.value = false; 
     showAnnotationPanel.value = false; 
+    clearTempHighlight();
     summonReference(currentSelection.value.text);
   }
 };
 
 const switchToAnnotation = () => {
+  triggerTouchShield();
   showSelectionMenu.value = false; 
   showWiki.value = false;
   currentNoteText.value = isSelectionOverlapping.value && overlappingCfi ? (annotationDataMap[overlappingCfi]?.note || '') : '';
@@ -251,7 +315,9 @@ const switchToAnnotation = () => {
 };
 
 const markAnnotation = () => {
+  triggerTouchShield();
   const cfi = currentSelection.value.cfi;
+  clearTempHighlight();
   
   if (!annotationDataMap[cfi]) {
     annotationDataMap[cfi] = {
@@ -270,6 +336,7 @@ const markAnnotation = () => {
   props.rendition.annotations.add(
     'highlight', cfi, {}, 
     (e) => {
+      triggerTouchShield();
       const contents = props.rendition.getContents()[0];
       const selection = contents ? contents.window.getSelection() : null;
       if (selection && !selection.isCollapsed && selection.toString().trim().length > 0) return;
@@ -285,6 +352,7 @@ const markAnnotation = () => {
 
       currentNoteText.value = annotationDataMap[cfi].note || '';     
       showAnnotationPanel.value = true;
+      panelOpenTime = Date.now();
     }, 
     'custom-hl', 
     { "fill": "#808080", "fill-opacity": "0.3", "mix-blend-mode": "multiply" } 
@@ -295,6 +363,7 @@ const markAnnotation = () => {
 };
 
 const summonReference = async (query) => {
+  triggerTouchShield();
   showWiki.value = true;
   wikiContent.value = '<p class="text-neutral-500 font-mono text-center mt-10">⏳ Connecting to portal...</p>';
   setTimeout(() => {
