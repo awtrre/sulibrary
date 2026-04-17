@@ -173,8 +173,8 @@ const applyTheme = () => {
       'margin-bottom': '1em !important',
     },
     'img, svg, video': {
-      'display': 'block !important', 
-      'margin': '1em auto !important', 
+      'display': 'inline-block !important', 
+      'margin': '1em 0 !important', 
       'max-width': '100% !important',
       'max-height': '80vh !important' 
     },
