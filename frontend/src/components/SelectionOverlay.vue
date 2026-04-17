@@ -231,7 +231,14 @@ const getRangeAtPoint = (doc, x, y) => {
 const processPointerDown = (e, x, y) => {
   isLongPressTriggered.value = false;
   if (e.target && e.target.classList && e.target.classList.contains('custom-hl')) return;
-
+  // ✨ 新增防线：如果起手点按的是图片、SVG等非纯文本元素，直接拦截，不开启长按定时器
+  if (e.target) {
+    const tagName = e.target.tagName ? e.target.tagName.toLowerCase() : '';
+    // SVG 内部可能会点到 path，所以用 closest 向上查找最稳妥
+    if (tagName === 'img' || tagName === 'image' || e.target.closest('svg, img, video')) {
+      return; 
+    }
+  }
   const contents = props.rendition.getContents()[0];
   if (!contents) return;
   const doc = contents.document;
@@ -264,12 +271,13 @@ const processPointerDown = (e, x, y) => {
       };
 
       const onUp = () => {
+        isLongPressTriggered.value = false; // ✨ 修复 1：抬手后立刻重置内部长按状态
         doc.removeEventListener('mousemove', onMove);
         doc.removeEventListener('touchmove', onMove);
         doc.removeEventListener('mouseup', onUp);
         doc.removeEventListener('touchend', onUp);
         
-        // 💻 电脑端专属：抬手后延迟 150ms 结算选区并呼出菜单（手机端不用这个，靠 EpubReader 里的 touchend）
+        // 💻 电脑端专属：抬手后延迟 150ms 结算选区并呼出菜单
         if (!isMobile) {
           setTimeout(() => {
             const currentSelection = win.getSelection();
@@ -283,8 +291,15 @@ const processPointerDown = (e, x, y) => {
                 console.warn("选区获取失败，尝试降级");
                 showPendingMenu();
               }
+            } else {
+              // ✨ 修复 2：核心兜底。如果选区为空（例如在空白处长按松手），必须把保护图层盖回去！
+              setSelectionLayerActive(false);
+              clearNativeSelection();
             }
           }, 150);
+        } else {
+          // 📱 手机端兜底：即使交给了 EpubReader 处理，也顺手盖上图层保证安全
+          setSelectionLayerActive(false);
         }
       };
 
@@ -300,9 +315,10 @@ const processPointerDown = (e, x, y) => {
 
 const processPointerUp = () => {
   clearTimeout(longPressTimer); 
-  return isLongPressTriggered.value; // 返回 true 说明刚才是在长按划线，EpubReader 必须 return 终止翻页
+  const wasTriggered = isLongPressTriggered.value;
+  isLongPressTriggered.value = false; // ✨ 修复 3：确保从外部调用抬手事件时，状态也被彻底重置
+  return wasTriggered; // 返回 true 说明刚才是在长按划线，EpubReader 必须 return 终止翻页
 };
-
 // 重新闭环：清空选区的同时，一定要把玻璃盖回去！
 const clearNativeSelection = () => {
   if (props.rendition) {
