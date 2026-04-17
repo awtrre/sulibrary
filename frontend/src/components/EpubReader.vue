@@ -200,11 +200,29 @@ const applyTheme = () => {
 // ==========================================
 // 1. 生命周期与初始化 (重构极简版)
 // ==========================================
+// === 新增：长宽比排版计算器 ===
+const updateLayoutMode = () => {
+  if (!rendition) return;
+  const w = window.innerWidth;
+  const h = window.innerHeight;
+  
+  // 核心逻辑：宽度 >= 768，且 长宽比 > 1.1（明显的横屏状态）才开启双排
+  const targetSpread = (w >= 768 && (w / h) > 1.1) ? 'auto' : 'none';
+  
+  // 只有在状态确实需要改变时，才触发 epub.js 重新排版
+  if (rendition.settings.spread !== targetSpread) {
+    rendition.spread(targetSpread);
+  }
+};
+
 onMounted(() => {
   initReader();
+  // 监听屏幕旋转或窗口大小调整
+  window.addEventListener('resize', updateLayoutMode);
 });
 
 onUnmounted(() => {
+  window.removeEventListener('resize', updateLayoutMode); // 打扫战场，移除监听
   if (epubBook) {
     epubBook.destroy(); // 销毁实例，释放内存 [cite: 2]
   }
@@ -246,12 +264,16 @@ const initReader = async () => {
     }
 
     // 3. 阅读器渲染配置 [cite: 2]
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    const initialSpread = (w >= 768 && (w / h) > 1.1) ? 'auto' : 'none';
+
     rendition = epubBook.renderTo(viewer.value, {
       width: '100%', 
       height: '100%', 
       flow: 'paginated', 
       manager: 'default',
-      spread: 'none',      
+      spread: initialSpread, 
       allowScriptedContent: true
     });
 
