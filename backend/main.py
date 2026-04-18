@@ -96,13 +96,19 @@ async def extract_epub_to_folder(source_path: str, book_id: str, remove_source: 
 
 async def convert_to_epub_task(source_file_path: str, book_id: str):
     """
-    原生炼金炉：直接在后端本地调用 ebook-convert！稳如老狗！
+    原生炼金炉：加入强制切片逻辑，专治各种单文件巨兽！
     """
     from database import DB_PATH
     print(f"🔥 本地炼金炉启动，目标文件: {source_file_path}")
     
     calibre_output_epub = f"/app/data/raw_books/converted_{book_id}.epub"
-    cmd = ["ebook-convert", source_file_path, calibre_output_epub]
+    
+    # ✨ 核心修复：加入 --epub-max-item-size 150 参数
+    # 哪怕原来已经是 epub 格式，calibre 也会重新读取并强行将超过 150KB 的 HTML 文件切成多个小文件
+    cmd = [
+        "ebook-convert", source_file_path, calibre_output_epub,
+        "--flow-size", "150" 
+    ]
 
     try:
         process = await asyncio.create_subprocess_exec(
@@ -116,12 +122,12 @@ async def convert_to_epub_task(source_file_path: str, book_id: str):
             error_msg = stderr.decode('utf-8', errors='ignore').strip()
             raise Exception(f"本地转换引擎报错: {error_msg}")
 
-        print(f"✅ 转换成功，生成临时文件: {calibre_output_epub}")
+        print(f"✅ 结构重铸成功，生成标准切片文件: {calibre_output_epub}")
 
-        # 调用爆破术 (注意这里接收了两个返回值)
+        # 调用爆破术 (这里的 _inject_sync_anchors 会自动适配刚切好的多个小文件)
         final_dir, total_units = await extract_epub_to_folder(calibre_output_epub, book_id, remove_source=True)
         
-        # 更新记忆水晶 (加上 total_units)
+        # 更新记忆水晶 (覆盖真实路径，并将 format 统一修正为 epub)
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
                 "UPDATE books SET format = 'epub', file_path = ?, total_units = ? WHERE id = ?",
@@ -129,11 +135,11 @@ async def convert_to_epub_task(source_file_path: str, book_id: str):
             )
             await db.commit()
             
-        # 清理原始非 EPUB 文件
+        # 清理原始上传的文件（现在不用区分格式了，直接删原件）
         if os.path.exists(source_file_path):
             os.remove(source_file_path)
             
-        print(f"✨ 炼金圆满完成！书籍 {book_id} 已入库。")
+        print(f"✨ 炼金圆满完成！书籍 {book_id} 已切片并入库。")
 
     except Exception as e:
         print(f"💥 炼金炉炸膛: {e}")
@@ -414,6 +420,7 @@ async def upload_magic_book(
         shutil.copyfileobj(file.file, buffer)
 
     format_type = file_ext.replace('.', '')
+    # ✨ 暂存状态：不管什么书，刚上来统统标记为原始路径，等待洗礼
     db_save_path = temp_path
     
     db_path = "/app/data/library.db"
@@ -423,6 +430,7 @@ async def upload_magic_book(
         user_info = await cursor.fetchone()
         is_public = 1 if (user_info and user_info[0]) else 0
 
+        # 先入库占个位置
         await db.execute(
             "INSERT INTO books (id, title, file_path, format, uploader_id, is_public) VALUES (?, ?, ?, ?, ?, ?)",
             (book_id, title, db_save_path, format_type, user_id, is_public)
@@ -430,20 +438,10 @@ async def upload_magic_book(
         await db.execute("INSERT INTO user_books (user_id, book_id) VALUES (?, ?)", (user_id, book_id))
         await db.commit()
 
-    if file_ext == '.epub':
-        # 接收两个返回值
-        final_path, total_units = await extract_epub_to_folder(temp_path, book_id, remove_source=True)
-        async with aiosqlite.connect(db_path) as db:
-            # 更新 total_units
-            await db.execute("UPDATE books SET file_path = ?, total_units = ? WHERE id = ?", (final_path, total_units, book_id))
-            await db.commit()
-        return {"status": "success", "message": "EPUB 已就绪，秒开已激活！"}
+    # ✨ 核心改动：众生平等！所有的书（包括 .epub）都扔进后台炼金炉进行重铸和切片！
+    background_tasks.add_task(convert_to_epub_task, temp_path, book_id)
     
-    elif file_ext in ['.mobi', '.azw3', '.txt', '.pdf']:
-        background_tasks.add_task(convert_to_epub_task, temp_path, book_id)
-        return {"status": "processing", "message": "非 EPUB 格式，后台炼金炉正在努力转换中..."}
-
-    return {"status": "success", "message": "上传成功"}
+    return {"status": "processing", "message": "书籍已投入炼金炉进行结构重铸与附魔，请稍后刷新书架查看..."}
 
 @app.delete("/api/books/{book_id}")
 async def delete_book(book_id: str, user_token: Optional[str] = Header(None), guest_uuid: Optional[str] = Header(None)):

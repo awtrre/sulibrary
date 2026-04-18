@@ -205,7 +205,9 @@ const updateLayoutMode = () => {
   if (!rendition) return;
   const w = window.innerWidth;
   const h = window.innerHeight;
-  
+  if (selectionOverlayRef.value) {
+    selectionOverlayRef.value.hideMenuOnly(); 
+  }
   // 核心逻辑：宽度 >= 768，且 长宽比 > 1.1（明显的横屏状态）才开启双排
   const targetSpread = (w >= 768 && (w / h) >=1.25) ? 'auto' : 'none';
   
