@@ -12,7 +12,12 @@
   <div
     v-if="showSelectionMenu"
     class="absolute z-50 bg-neutral-900 border border-neutral-800 shadow-2xl flex items-center font-mono text-xs tracking-widest animate-fade-in"
-    :style="{ top: selectionMenuPos.y + 'px', left: selectionMenuPos.x + 'px', transform: 'translate(-50%, -100%)', marginTop: '-12px' }"
+    :style="{ 
+      top: selectionMenuPos.y + 'px', 
+      left: selectionMenuPos.x + 'px', 
+      transform: selectionMenuPos.isFlipped ? 'translate(-50%, 0)' : 'translate(-50%, -100%)', 
+      marginTop: selectionMenuPos.isFlipped ? '12px' : '-12px' 
+    }"
   >
     <button @click="copyText" class="px-5 py-3 text-neutral-400 hover:text-white transition-colors">COPY</button>
     <div class="w-px h-4 bg-neutral-800"></div>
@@ -21,8 +26,15 @@
     <button v-if="!isSelectionOverlapping" @click="markAnnotation" class="px-5 py-3 text-neutral-400 hover:text-white transition-colors">MARK</button>
     <button v-else @click="deleteOverlappingAnnotation" class="px-5 py-3 text-neutral-400 hover:text-white transition-colors">DELETE</button>
 
-    <div class="absolute left-1/2 bottom-0 transform -translate-x-1/2 translate-y-full w-0 h-0 border-l-[6px] border-r-[6px] border-t-[6px] border-transparent border-t-neutral-900"></div>
-    <div class="absolute left-1/2 bottom-[-1px] transform -translate-x-1/2 translate-y-full w-0 h-0 border-l-[7px] border-r-[7px] border-t-[7px] border-transparent border-t-neutral-800 -z-10"></div>
+    <template v-if="!selectionMenuPos.isFlipped">
+      <div class="absolute bottom-0 transform -translate-x-1/2 translate-y-full w-0 h-0 border-l-[6px] border-r-[6px] border-t-[6px] border-transparent border-t-neutral-900" :style="{ left: `calc(50% + ${selectionMenuPos.triangleOffset}px)` }"></div>
+      <div class="absolute bottom-[-1px] transform -translate-x-1/2 translate-y-full w-0 h-0 border-l-[7px] border-r-[7px] border-t-[7px] border-transparent border-t-neutral-800 -z-10" :style="{ left: `calc(50% + ${selectionMenuPos.triangleOffset}px)` }"></div>
+    </template>
+    
+    <template v-else>
+      <div class="absolute top-0 transform -translate-x-1/2 -translate-y-full w-0 h-0 border-l-[6px] border-r-[6px] border-b-[6px] border-transparent border-b-neutral-900" :style="{ left: `calc(50% + ${selectionMenuPos.triangleOffset}px)` }"></div>
+      <div class="absolute top-[-1px] transform -translate-x-1/2 -translate-y-full w-0 h-0 border-l-[7px] border-r-[7px] border-b-[7px] border-transparent border-b-neutral-800 -z-10" :style="{ left: `calc(50% + ${selectionMenuPos.triangleOffset}px)` }"></div>
+    </template>
   </div>
 
   <div v-if="showAnnotationPanel" class="fixed inset-0 z-50 flex flex-col justify-end animate-fade-in">
@@ -77,7 +89,7 @@ const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry/i.test(navigator.use
 
 // --- 状态封闭化：原 EpubReader 中的 UI 状态全部迁移至此 ---
 const showSelectionMenu = ref(false);
-const selectionMenuPos = ref({ x: 0, y: 0 }); 
+const selectionMenuPos = ref({ x: 0, y: 0, isFlipped: false, triangleOffset: 0 });
 const currentSelection = ref({ cfi: null, text: '', segments: [] });
 const isSelectionOverlapping = ref(false);
 const isLongPressTriggered = ref(false);
@@ -352,16 +364,75 @@ const processSelection = (cfiRange, text, range, contents, isPointerDownFlag) =>
       break;
     }
   }
-
   // 2. 计算物理位置 (用于决定菜单弹出的坐标)
-  const rect = range.getBoundingClientRect();
+  
+  // 🚀 核心重构：完全信任浏览器的 DOM 阅读顺序，只过滤手机端幽灵节点
+  const rects = Array.from(range.getClientRects()).filter(r => r.width > 2 && r.height > 2);
+  let targetRect = range.getBoundingClientRect(); // 兜底
+
+  if (rects.length > 0) {
+    // rects[0] 绝对是高亮部分的物理起点
+    const firstTop = rects[0].top;
+    let minLeft = rects[0].left;
+    let maxRight = rects[0].right;
+
+    // 顺藤摸瓜，只拼合“第一行”的文字碎片
+    for (let i = 1; i < rects.length; i++) {
+      const currentRect = rects[i];
+      const prevRect = rects[i - 1];
+
+      // 判定“第一行结束”的两个铁证：
+      // 1. Y 轴发生断层 (相差 > 10px，说明掉到下一行，或者跳到另一栏了)
+      const isYChanged = Math.abs(currentRect.top - firstTop) > 10;
+      // 2. X 轴发生倒退 (当前字的左边缘，比上一个字的左边缘还要靠左，说明发生“回车”了。留 5px 容差防抖)
+      const isXReversed = currentRect.left < prevRect.left - 5;
+
+      if (isYChanged || isXReversed) {
+        break; // 第一行到此为止，切断！
+      }
+
+      // 如果还在同一行，扩充第一行的包围盒
+      minLeft = Math.min(minLeft, currentRect.left);
+      maxRight = Math.max(maxRight, currentRect.right);
+    }
+
+    targetRect = {
+      top: rects[0].top,
+      bottom: rects[0].bottom,
+      left: minLeft,
+      right: maxRight,
+      width: maxRight - minLeft
+    };
+  }
+  
   const iframe = contents.document.defaultView.frameElement;
   const iframeRect = iframe.getBoundingClientRect();
-  const pos = { 
-    x: rect.left + iframeRect.left + (rect.width / 2), 
-    y: rect.top + iframeRect.top 
-  };
+  
+  // 基准点：现在绝对能精准锁定在“第一行高亮部分”的正中心
+  const baseX = targetRect.left + iframeRect.left + (targetRect.width / 2);
+  const baseY = targetRect.top + iframeRect.top;
+  const bottomY = targetRect.bottom + iframeRect.top; 
 
+  // --- 以下边缘限位与小三角偏移逻辑保持不变 ---
+  const menuWidth = 280; 
+  const halfWidth = menuWidth / 2;
+  const screenWidth = window.innerWidth;
+
+  const clampedX = Math.max(halfWidth + 10, Math.min(baseX, screenWidth - halfWidth - 10));
+  
+  let triangleOffset = baseX - clampedX;
+  const maxTriangleOffset = halfWidth - 20; 
+  triangleOffset = Math.max(-maxTriangleOffset, Math.min(triangleOffset, maxTriangleOffset));
+
+  const isFlipped = baseY < 60; 
+  const finalY = isFlipped ? bottomY : baseY; 
+
+  const pos = { 
+    x: clampedX, 
+    y: finalY, 
+    isFlipped: isFlipped,
+    triangleOffset: triangleOffset
+  };
   const selectionData = { cfi: cfiRange, text: text, pos: pos, segments: currentSegments };
 
   // 3. 核心分发逻辑
