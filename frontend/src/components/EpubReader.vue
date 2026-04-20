@@ -324,6 +324,11 @@ const initReader = async () => {
     // 4. Iframe 内部事件拦截：交给子组件 SelectionOverlay 处理 [cite: 2]
     rendition.on('rendered', (e, iframe) => {
       const doc = iframe.document;
+      // ✨ 新增：每次渲染新章节时，去唤醒该章节潜伏的高亮句子
+      const contents = rendition.getContents()[0];
+      if (contents) {
+        selectionOverlayRef.value?.renderAnnotationsForCurrentChapter(contents);
+      }
       // ✨ 新增防线：彻底禁用浏览器默认的拖拽行为（防止长按文字后被当成文件/文本拖走）
       doc.addEventListener('dragstart', (event) => {
         event.preventDefault();
@@ -388,15 +393,20 @@ const initReader = async () => {
     // 同步 UI 状态
     currentPage.value = initialPageNumber;
     inputPage.value = initialPageNumber;
-totalPages.value = props.book.total_units ? props.book.total_units - 1 : '-';
+    totalPages.value = props.book.total_units ? props.book.total_units - 1 : '-';
 
-    // 执行展示
+    // 1. 执行静默展示（此时因为没有加 fade-in 的 class，所以对用户还是不可见的或者在遮罩下）
     await rendition.display(targetLocation || undefined);
-    if (viewer.value) viewer.value.classList.add('animate-fade-in');
     
-    loadSavedAnnotations(props.book.id, rendition);
+    // ✨ 2. 关键修复：加入 await！强制等待向后端拉取批注数据，并让子组件完成首次物理绘制
+    await loadSavedAnnotations(props.book.id, rendition);
     
-    // 延迟 500ms 激活雷达，防止初始化时的虚假跳转触发重复保存
+    // ✨ 3. 此时 DOM 已经带着高亮加载完毕，揭开帷幕！
+    requestAnimationFrame(() => {
+      if (viewer.value) viewer.value.classList.add('animate-fade-in');
+    });
+    
+    // 4. 延迟 500ms 激活雷达，防止初始化时的虚假跳转触发重复保存
     setTimeout(() => { isReadyToSave = true; }, 500);
 
     // 6. 进度雷达：监听翻页并寻找 unit-X 锚点 [cite: 2]
@@ -601,30 +611,14 @@ const loadSavedAnnotations = async (bookId, rendition) => {
     });
     const data = await res.json();
     if (data.status === 'success') {
+      // ✨ 1. 把所有章节的原始批注数据交给子组件缓存起来
+      selectionOverlayRef.value?.setRawAnnotations(data.annotations);
+      
+      // ✨ 2. 紧接着渲染当前（空降落地时）章节的批注
       const contents = rendition.getContents()[0];
-      if (!contents) return;
-
-      data.annotations.forEach(anno => {
-        try {
-          // 逆向还原：通过 segments 找到 DOM 节点，转回 CFI 给 epub.js 渲染
-          const range = contents.document.createRange();
-          const startNode = contents.document.getElementById(anno.segments[0].nodeX);
-          const endNode = contents.document.getElementById(anno.segments[anno.segments.length - 1].nodeX);
-          
-          if (startNode && endNode) {
-            // 这里的定位逻辑完全对应你后端存的 node1 10-20 结构 [cite: 4]
-            range.setStart(startNode.firstChild || startNode, anno.segments[0].startOffset);
-            range.setEnd(endNode.firstChild || endNode, anno.segments[anno.segments.length - 1].endOffset);
-            
-            const cfi = contents.cfiFromRange(range);
-            
-            // 将数据同步到 SelectionOverlay 的内部 Map 中，保证长按能弹出删除/详情
-            selectionOverlayRef.value?.injectExternalAnnotation(cfi, anno);
-          }
-        } catch (err) {
-          console.warn("还原划线失败:", err);
-        }
-      });
+      if (contents) {
+        selectionOverlayRef.value?.renderAnnotationsForCurrentChapter(contents);
+      }
     }
   } catch (e) {
     console.error("拉取批注失败", e);

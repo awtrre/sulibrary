@@ -1,3 +1,5 @@
+import json
+import hashlib
 import subprocess
 import zipfile
 import shutil
@@ -59,6 +61,16 @@ class AuthRequest(BaseModel):
 class TTSRequest(BaseModel):
     text: str
     voice: Optional[str] = "zh_CN-huayan-medium"
+
+class SegmentItem(BaseModel):
+    nodeX: str
+    startOffset: int
+    endOffset: int
+
+class AnnotationSyncRequest(BaseModel):
+    text: str
+    segments: list[SegmentItem]
+    note: Optional[str] = ""
 
 # -----------------------------------------------------------------
 # 🛠️ 炼金工坊核心工具：EPUB 爆破术
@@ -554,6 +566,74 @@ async def proxy_wikipedia(query: str):
             print(f"代理请求失败: {e}") 
             raise HTTPException(status_code=500, detail="魔法网络波动，穿墙失败啦！请检查 SOCKS5 端口哦！")
 
+@app.get("/api/books/{book_id}/annotations")
+async def get_annotations(book_id: str, user_token: Optional[str] = Header(None), guest_uuid: Optional[str] = Header(None)):
+    from database import DB_PATH
+    async with aiosqlite.connect(DB_PATH) as db:
+        user_id = await get_current_user_id(db, user_token, guest_uuid)
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT id, segments, selected_text, note FROM annotations WHERE user_id = ? AND book_id = ?",
+            (user_id, book_id)
+        )
+        rows = await cursor.fetchall()
+        
+        result = []
+        for row in rows:
+            result.append({
+                "id": row["id"],
+                "segments": json.loads(row["segments"]),
+                "text": row["selected_text"],
+                "note": row["note"]
+            })
+        return {"status": "success", "annotations": result}
+
+@app.post("/api/books/{book_id}/annotations")
+async def sync_annotation(book_id: str, payload: AnnotationSyncRequest, user_token: Optional[str] = Header(None), guest_uuid: Optional[str] = Header(None)):
+    from database import DB_PATH
+    
+    if not payload.segments:
+        raise HTTPException(status_code=400, detail="无效的高亮数据")
+        
+    # 🌟 核心修正：遍历你传来的所有 node (node1 10-20, node2 1-20...)，拼接成完整的指纹字符串
+    fingerprint_str = book_id + "_" + "_".join([f"{seg.nodeX}_{seg.startOffset}_{seg.endOffset}" for seg in payload.segments])
+    anno_id = hashlib.md5(fingerprint_str.encode()).hexdigest()
+    
+    seg_list = [seg.model_dump() if hasattr(seg, 'model_dump') else seg.dict() for seg in payload.segments]
+    segments_json = json.dumps(seg_list, ensure_ascii=False)
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        user_id = await get_current_user_id(db, user_token, guest_uuid)
+        
+        # UPSERT：指纹不存在就插入，存在就只更新 note 和 text
+        await db.execute("""
+            INSERT INTO annotations (id, user_id, book_id, segments, selected_text, note)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET 
+                note = excluded.note,
+                selected_text = excluded.selected_text
+        """, (anno_id, user_id, book_id, segments_json, payload.text, payload.note))
+        await db.commit()
+        
+    return {"status": "success", "id": anno_id, "message": "岁月痕迹已铭刻"}
+
+@app.post("/api/books/{book_id}/annotations/delete")
+async def delete_annotation(book_id: str, payload: AnnotationSyncRequest, user_token: Optional[str] = Header(None), guest_uuid: Optional[str] = Header(None)):
+    from database import DB_PATH
+    
+    if not payload.segments:
+        return {"status": "success"}
+        
+    # 🌟 用同样的逻辑，算出你要删的这堆 node 的精准 ID
+    fingerprint_str = book_id + "_" + "_".join([f"{seg.nodeX}_{seg.startOffset}_{seg.endOffset}" for seg in payload.segments])
+    anno_id = hashlib.md5(fingerprint_str.encode()).hexdigest()
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        user_id = await get_current_user_id(db, user_token, guest_uuid)
+        await db.execute("DELETE FROM annotations WHERE id = ? AND user_id = ?", (anno_id, user_id))
+        await db.commit()
+        
+    return {"status": "success", "message": "岁月痕迹已抹除"}
 # -----------------------------------------------------------------
 # 🗣️ 赛博伴读 (Piper TTS 调用)
 # -----------------------------------------------------------------

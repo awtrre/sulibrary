@@ -58,13 +58,19 @@ async def init_db():
             await db.execute("ALTER TABLE user_books ADD COLUMN font_size INTEGER DEFAULT 100")
         except Exception:
             pass
-        # 4. ✍️ 岁月痕迹表 (你的划线、批注全在这里)
+
+        # ==========================================
+        # 👇 临时精准爆破旧版 annotations 表 👇
+        # ==========================================
+        logging.info("💣 正在执行精准爆破：清理旧版批注表...")
+
+        # 4. ✍️ 岁月痕迹表 (严格遵循前端的 segments 逻辑重构)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS annotations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id TEXT PRIMARY KEY,        -- 用整个 segments 算出来的唯一指纹
                 user_id INTEGER,
                 book_id TEXT,
-                cfi_range TEXT NOT NULL,    -- 划线的起止坐标范围 (Epub.js 原生支持)
+                segments TEXT NOT NULL,     -- 直接存你传过来的 JSON 数组
                 selected_text TEXT,         -- 你勾画出的那段原话
                 note TEXT,                  -- 你写的批注内容
                 color TEXT DEFAULT 'gray',  -- 极简风嘛，默认灰色高亮 🕶️

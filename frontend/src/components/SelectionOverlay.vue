@@ -85,7 +85,9 @@ const props = defineProps({
     required: true
   }
 });
-
+const setRawAnnotations = (annotations) => {
+  rawAnnotationsCache = annotations;
+};
 // 向父组件汇报特定事件（比如绘制高亮时需要拦截父组件的点击翻页）
 const emit = defineEmits(['cancel-tap']);
 const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry/i.test(navigator.userAgent) || 
@@ -112,6 +114,8 @@ let overlappingCfi = null;
 let panelOpenTime = 0;
 let longPressTimer = null;
 let noteSaveTimer = null;
+let rawAnnotationsCache = [];
+let renderTimer = null;
 
 const triggerTouchShield = () => {
   isGlobalShieldActive.value = true;
@@ -126,6 +130,64 @@ const clearTempHighlight = () => {
     props.rendition.annotations.remove(tempHighlightCfi.value, 'highlight');
     tempHighlightCfi.value = null;
   }
+};
+// ✨ 修改：跨章渲染核心逻辑（加入防飘遮掩与强行截断动画）
+const renderAnnotationsForCurrentChapter = (contents) => {
+  if (!contents || !contents.document) return;
+  // 🛡️ 战术 1：切断全局动画！
+  // 注意：这段 style 是注入到 document (Vue 主文档) 的，而不是 iframe 中，彻底掐断高亮 SVG 的飞行动画
+  let styleEl = document.getElementById('anti-fly-hl');
+  if (!styleEl) {
+    styleEl = document.createElement('style');
+    styleEl.id = 'anti-fly-hl';
+    document.head.appendChild(styleEl);
+    styleEl.innerHTML = `
+      .custom-hl, .temp-hl, .epubjs-hl { 
+        transition: none !important; 
+        animation: none !important; 
+      }
+      svg g[class*="hl"] rect {
+        transition: none !important;
+        animation: none !important;
+      }
+    `;
+  }
+  // 🛡️ 战术 2：先发制人，剥夺 Epub.js 的记忆！
+  // 在排版挣扎期，立刻遍历清空 Epub.js 内部对所有高亮的记忆
+  Object.keys(annotationDataMap).forEach(savedCfi => {
+    if (props.rendition) {
+      try {
+        props.rendition.annotations.remove(savedCfi, 'highlight');
+      } catch(e) {}
+    }
+  });
+
+  // ✨ 核心修复：防抖锁！一巴掌拍死之前排队的定时器，防止网络请求和渲染事件并发导致高亮变亮（重叠）
+  clearTimeout(renderTimer);
+
+  // 🛡️ 战术 3：排版绝对死透后（200ms），重新精准落笔
+  renderTimer = setTimeout(() => {
+    rawAnnotationsCache.forEach(anno => {
+      try {
+        const startNode = contents.document.getElementById(anno.segments[0].nodeX);
+        const endNode = contents.document.getElementById(anno.segments[anno.segments.length - 1].nodeX);
+
+        if (startNode && endNode) {
+          const range = contents.document.createRange();
+          range.setStart(startNode.firstChild || startNode, anno.segments[0].startOffset);
+          range.setEnd(endNode.firstChild || endNode, anno.segments[anno.segments.length - 1].endOffset);
+
+          const cfi = contents.cfiFromRange(range);
+
+          // 此时的 anno 已经是绝对最新状态（包含用户刚刚修改过的 note）
+          // 在完全静止的 DOM 和绝对正确的坐标上，精准盖下唯一的章！
+          injectExternalAnnotation(cfi, anno);
+        }
+      } catch (err) {
+        // 节点不在当前章节，静默跳过
+      }
+    });
+  }, 200); 
 };
 // --- 核心方法：提取选中坐标 (原封不动) ---
 const extractSegments = (range, doc) => {
@@ -164,6 +226,7 @@ const extractSegments = (range, doc) => {
   }
   return Object.values(segmentsMap);
 };
+
 const setSelectionLayerActive = (isActive) => {
   if (!props.rendition) return;
   const contents = props.rendition.getContents()[0];
@@ -502,6 +565,7 @@ const closeAll = () => {
   pendingSelection = null;
   clearNativeSelection();
   clearTempHighlight();
+  currentNoteText.value = '';
 };
 
 const isAnyUIOpen = () => {
@@ -521,11 +585,15 @@ const closeAnnotationPanel = () => {
   showAnnotationPanel.value = false;
   clearNativeSelection(); 
   clearTempHighlight();
+  currentNoteText.value = '';
 };
 
 const deleteOverlappingAnnotation = async () => {
   if (overlappingCfi) {
     const data = annotationDataMap[overlappingCfi];
+    rawAnnotationsCache = rawAnnotationsCache.filter(
+      anno => JSON.stringify(anno.segments) !== JSON.stringify(data.segments)
+    );
     
     // 1. 告知后端抹除岁月痕迹
     try {
@@ -569,6 +637,13 @@ const syncNote = () => {
   if (overlappingCfi && annotationDataMap[overlappingCfi]) {
     // 1. 更新本地缓存（保证前端 UI 不卡顿）
     annotationDataMap[overlappingCfi].note = currentNoteText.value;
+    const targetSegs = JSON.stringify(annotationDataMap[overlappingCfi].segments);
+    const cacheIndex = rawAnnotationsCache.findIndex(
+      anno => JSON.stringify(anno.segments) === targetSegs
+    );
+    if (cacheIndex !== -1) {
+      rawAnnotationsCache[cacheIndex].note = currentNoteText.value;
+    }
     
     // 2. ✨ 新增：静默同步到后端（停止打字 800ms 后自动触发更新）
     clearTimeout(noteSaveTimer);
@@ -629,6 +704,9 @@ const markAnnotation = async () => {
   
   // 1. 清除刚才画的临时半透明高亮
   clearTempHighlight();
+  if (!showAnnotationPanel.value) {
+    currentNoteText.value = '';
+  }
   
   // 2. 组装发给后端的结构化数据
   const payload = {
@@ -636,7 +714,7 @@ const markAnnotation = async () => {
     segments: currentSelection.value.segments, 
     note: currentNoteText.value 
   };
-
+  rawAnnotationsCache.push(payload);
   // 3. 异步发送给后端持久化 (不会阻塞 UI 渲染)
   try {
     await fetch(`/api/books/${props.book_id}/annotations`, {
@@ -764,7 +842,9 @@ defineExpose({
   processPointerUp,
   clearNativeSelection,
   setSelectionLayerActive,
-  injectExternalAnnotation 
+  injectExternalAnnotation,
+  setRawAnnotations,
+  renderAnnotationsForCurrentChapter 
 });
 </script>
 
