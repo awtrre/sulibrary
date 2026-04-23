@@ -269,6 +269,27 @@ onUnmounted(() => {
   }
 });
 
+// ✨ 核心修复：带 CSS 渲染缓冲的安全跳转包装器
+const preciseDisplay = async (targetLocation) => {
+  // 如果是空降，或者不带锚点的纯章节跳转，直接放行
+  if (!targetLocation || typeof targetLocation !== 'string' || !targetLocation.includes('#')) {
+    return rendition.display(targetLocation);
+  }
+
+  // 👇 如果是跨章跳跃到特定节点（href#unit-X 格式）
+  const [baseHref, anchorId] = targetLocation.split('#');
+  
+  // 1. 先只加载章节的基础路径。这会强迫 epub.js 创建 iframe 并注入 applyTheme 的样式
+  await rendition.display(baseHref);
+  
+  // 2. 命脉所在：强制等待 50 毫秒！
+  // 给浏览器渲染引擎留出一丁点时间，让它把你的 line-height 和 margin 彻底应用并固化排版
+  await new Promise(resolve => setTimeout(resolve, 50));
+  
+  // 3. 此时排版已是最终形态，再次执行带节点的精准空降，百发百中！
+  return rendition.display(targetLocation);
+};
+
 const initReader = async () => {
   try {
     // 1. 实例化书籍
@@ -321,14 +342,38 @@ const initReader = async () => {
     applyTheme(); // 应用黑白灰主题
     rendition.themes.fontSize(`${currentFontSize.value}%`);
 
+    rendition.hooks.content.register((contents) => {
+      return new Promise((resolve) => {
+        const doc = contents.document;
+
+        // 1. 提前把高亮批注画上去
+        selectionOverlayRef.value?.renderAnnotationsForCurrentChapter(contents);
+
+        // 2. 收集会导致排版变形的“延时炸弹”（字体和图片）
+        const pendingTasks = [];
+        if (doc.fonts && doc.fonts.ready) {
+          pendingTasks.push(doc.fonts.ready);
+        }
+        const images = Array.from(doc.querySelectorAll('img'));
+        images.forEach(img => {
+          if (!img.complete) {
+            pendingTasks.push(new Promise((imgResolve) => {
+              img.onload = imgResolve;
+              img.onerror = imgResolve;
+            }));
+          }
+        });
+
+        // 3. 所有排版炸弹排除，版面彻底固定，放行 Epub 引擎去计算最终坐标！
+        Promise.all(pendingTasks).then(() => {
+          resolve();
+        });
+      });
+    });
+
     // 4. Iframe 内部事件拦截：交给子组件 SelectionOverlay 处理 [cite: 2]
     rendition.on('rendered', (e, iframe) => {
       const doc = iframe.document;
-      // ✨ 新增：每次渲染新章节时，去唤醒该章节潜伏的高亮句子
-      const contents = rendition.getContents()[0];
-      if (contents) {
-        selectionOverlayRef.value?.renderAnnotationsForCurrentChapter(contents);
-      }
       // ✨ 新增防线：彻底禁用浏览器默认的拖拽行为（防止长按文字后被当成文件/文本拖走）
       doc.addEventListener('dragstart', (event) => {
         event.preventDefault();
@@ -395,11 +440,8 @@ const initReader = async () => {
     inputPage.value = initialPageNumber;
     totalPages.value = props.book.total_units ? props.book.total_units - 1 : '-';
 
-    // 1. 执行静默展示（此时因为没有加 fade-in 的 class，所以对用户还是不可见的或者在遮罩下）
-    await rendition.display(targetLocation || undefined);
-    
-    // ✨ 2. 关键修复：加入 await！强制等待向后端拉取批注数据，并让子组件完成首次物理绘制
-    await loadSavedAnnotations(props.book.id, rendition);
+    await loadSavedAnnotations(props.book.id, rendition); // 先拿批注数据
+    await preciseDisplay(targetLocation || undefined);    // 使用安全空降！
     
     // ✨ 3. 此时 DOM 已经带着高亮加载完毕，揭开帷幕！
     requestAnimationFrame(() => {
@@ -593,8 +635,9 @@ const openTocOverlay = () => {
   });
 };
 
-const jumpToCfiAndClose = (cfiOrHref) => {
-  rendition.display(cfiOrHref);
+const jumpToCfiAndClose = async (cfiOrHref) => {
+  // 修改为：
+  await preciseDisplay(cfiOrHref);
   showTocOverlay.value = false;
 };
 
@@ -712,10 +755,13 @@ const jumpToTargetPage = () => {
       const progress = targetUnit / total;
       saveProgressToBackend(preciseId, progress); 
       currentPage.value = targetUnit;
-      rendition.display(`${mapItem.href}#${preciseId}`).then(() => {
+      isJumpLocked = true;
+      if (viewer.value) viewer.value.style.opacity = '0'; // 隐身，掩盖二次刷新的动作
+
+      preciseDisplay(`${mapItem.href}#${preciseId}`).then(() => {
         showBars.value = false;
-        isJumpLocked = true;
-        setTimeout(() => { isJumpLocked = false; }, 500);
+        if (viewer.value) viewer.value.style.opacity = '1'; // 现身
+        setTimeout(() => { isJumpLocked = false; }, 300);
       });
     }
   }
@@ -736,7 +782,7 @@ const cycleFontSize = async () => {
     const mapItem = unitMap.find(m => targetUnit >= m.start && targetUnit <= m.end);
     if (mapItem) {
       const preciseId = `unit-${targetUnit}`;
-      await rendition.display(`${mapItem.href}#${preciseId}`);
+      await preciseDisplay(`${mapItem.href}#${preciseId}`);
     }
   }
   setTimeout(() => {   // 4. ✨ 等待渲染稳固后，解除蒙版，解锁雷达
