@@ -74,7 +74,11 @@
       
       <div class="flex-1 overflow-y-auto p-8 max-w-3xl mx-auto w-full scrollbar-hide">
         <ul v-if="activeOverlayTab === 'toc'" class="space-y-4">
-          <li v-for="item in tocList" :key="item.id" @click="jumpToCfiAndClose(item.href)" class="text-neutral-400 hover:text-neutral-100 cursor-pointer border-b border-neutral-800 pb-2 transition-colors">
+          <li v-for="item in tocList" :key="item.id" 
+              :id="item.isActive ? 'active-toc-item' : ''"
+              @click="jumpToCfiAndClose(item.href)" 
+              class="cursor-pointer border-b border-neutral-800 pb-2 transition-colors"
+              :class="item.isActive ? 'text-neutral-100 font-bold' : 'text-neutral-400 hover:text-neutral-100'">
             {{ item.label }}
           </li>
         </ul>
@@ -613,25 +617,90 @@ const handleTouch = (event) => {
   }
 };
 
-const openTocOverlay = () => {
+const openTocOverlay = async () => {
   showBars.value = false;
   showTocOverlay.value = true;
-  epubBook.loaded.navigation.then(nav => {
-    // 定义一个递归辅助函数来展平目录
-    const flattenToc = (items, level = 0) => {
-      return items.reduce((acc, item) => {
-        const indent = level > 0 ? '　'.repeat(level) : '';
-        acc.push({
-          ...item,
-          label: indent + item.label // 修改显示文案
-        });
-        if (item.subitems && item.subitems.length > 0) {
-          acc.push(...flattenToc(item.subitems, level + 1));
+
+  const nav = await epubBook.loaded.navigation;
+  const location = rendition.currentLocation();
+  const currentEndCfi = location?.end?.cfi || location?.start?.cfi;
+  const currentEndHref = location?.end?.href || location?.start?.href;
+  const currentCfi = location?.start?.cfi;
+  const currentHref = location?.start?.href;
+  const cfiParser = new ePub.CFI();
+  const contents = rendition.getContents()[0];
+
+  const flattenToc = (items, level = 0) => {
+    return items.reduce((acc, item) => {
+      const indent = level > 0 ? '　'.repeat(level) : '';
+      acc.push({
+        ...item,
+        label: indent + item.label,
+        isActive: false // 预设未激活
+      });
+      if (item.subitems && item.subitems.length > 0) {
+        acc.push(...flattenToc(item.subitems, level + 1));
+      }
+      return acc;
+    }, []);
+  };
+
+  let flatList = flattenToc(nav.toc);
+
+ // 1. 替换外层的 href 验证
+  if (currentEndHref) {
+    let activeIndex = -1;
+    // 2. 替换 spine 的获取
+    const currentSpineItem = epubBook.spine.get(currentEndHref);
+    const currentIndex = currentSpineItem ? currentSpineItem.index : -1;
+
+    if (currentIndex !== -1) {
+      for (let i = 0; i < flatList.length; i++) {
+        const item = flatList[i];
+        const tocSpineItem = epubBook.spine.get(item.href);
+
+        if (tocSpineItem) {
+          if (tocSpineItem.index < currentIndex) {
+            activeIndex = i;
+          } else if (tocSpineItem.index === currentIndex) {
+            let itemCfi = null;
+            const hashIndex = item.href.indexOf('#');
+
+            if (hashIndex !== -1 && contents) {
+              const hashId = item.href.substring(hashIndex + 1);
+              const targetNode = contents.document.getElementById(hashId);
+              if (targetNode) itemCfi = contents.cfiFromNode(targetNode);
+            }
+
+            // 3. 替换精准坐标的比对：用屏幕底部的 endCfi 去比大小
+            if (itemCfi && currentEndCfi) {
+              if (cfiParser.compare(currentEndCfi, itemCfi) >= 0) activeIndex = i;
+            } else {
+              activeIndex = i;
+            }
+          } else {
+            break; 
+          }
         }
-        return acc;
-      }, []);
-    };
-    tocList.value = flattenToc(nav.toc);
+      }
+    }
+
+    if (activeIndex !== -1) {
+      flatList[activeIndex].isActive = true;
+    }
+  }
+
+  tocList.value = flatList;
+
+  // ✨ 利用 nextTick 等待 DOM 渲染出高亮标记后，执行瞬间滚动
+  import('vue').then(({ nextTick }) => {
+    nextTick(() => {
+      const activeEl = document.getElementById('active-toc-item');
+      if (activeEl) {
+        // block: 'start' 会让这个元素刚好贴齐滚动容器的顶部
+        activeEl.scrollIntoView({ behavior: 'instant', block: 'center' });
+      }
+    });
   });
 };
 
