@@ -770,69 +770,85 @@ const openTocOverlay = async () => {
 };
 
 const jumpToCfiAndClose = async (cfiOrHref) => {
-  // 1. 关闭所有 UI 面板
-  showBars.value = false;
-  showTocOverlay.value = false;
+  // 1. 关闭所有 UI 面板
+  showBars.value = false;
+  showTocOverlay.value = false;
 
-  // 2. 借用黑幕逻辑
-  const mask = maskRef.value;
-  if (mask) {
-    mask.style.transition = 'none';
-    mask.offsetHeight; 
-    mask.style.opacity = '1';
-    mask.style.pointerEvents = 'auto';
-  }
-  isJumpLocked = true; // 🔒 锁住滚动雷达
+  // 2. 借用黑幕逻辑
+  const mask = maskRef.value;
+  if (mask) {
+    mask.style.transition = 'none';
+    mask.offsetHeight; 
+    mask.style.opacity = '1';
+    mask.style.pointerEvents = 'auto';
+  }
+  isJumpLocked = true; // 🔒 锁住滚动雷达
 
-  try {
-    let target = cfiOrHref;
-    let hashId = null;
+  // ✨ 1. 绝对死等：强迫浏览器先把黑幕实打实地渲染到屏幕上
+  await waitForPaint();
 
-    if (typeof target === 'string' && target.includes('#')) {
-      const [base, hash] = target.split('#');
-      hashId = decodeURIComponent(hash);
-      target = `${base}#${hashId}`;
-    }
+  try {
+    let target = cfiOrHref;
+    let hashId = null;
 
-    await rendition.display(target);
+    if (typeof target === 'string' && target.includes('#')) {
+      const [base, hash] = target.split('#');
+      hashId = decodeURIComponent(hash);
+      target = `${base}#${hashId}`;
+    }
 
-    if (hashId) {
-      await new Promise(resolve => setTimeout(resolve, 50));
-      const contents = rendition.getContents()[0];
-      if (contents) {
-        const targetNode = contents.document.getElementById(hashId);
-        if (targetNode) {
-          const preciseCfi = contents.cfiFromNode(targetNode);
-          await rendition.display(preciseCfi); 
+    // ✨ 2. 封装：把“跳页 -> 找精确锚点 -> 画高亮”这套高负载动作打包成一个异步任务
+    const performJumpAndRender = async () => {
+      await rendition.display(target);
+      if (hashId) {
+        await new Promise(resolve => setTimeout(resolve, 50));
+        const contents = rendition.getContents()[0];
+        if (contents) {
+          const targetNode = contents.document.getElementById(hashId);
+          if (targetNode) {
+            const preciseCfi = contents.cfiFromNode(targetNode);
+            await rendition.display(preciseCfi); 
+          }
         }
       }
-    }
-  } catch (error) {
-    console.error("跳转失败:", error);
-  } finally {
-    // 3. 揭开黑幕
-    requestAnimationFrame(() => {
-      setTimeout(() => {
-        if (mask) {
-          mask.style.transition = 'opacity 0.15s ease';
-          mask.style.opacity = '0';
-          mask.style.pointerEvents = 'none';
-        }
-        
-        // 动画结束（150ms）后立马解锁进度雷达
-        setTimeout(() => { 
-          isJumpLocked = false; // 🔓 1. 解除雷达锁
-          
-          // ✨ 核心修复：锁解除后，DOM 已经彻底稳定。
-          // 我们主动呼叫预置的雷达函数，扫描屏幕上的 unit-X 并保存进度！
-          if (rendition.getContents().length > 0) {
-            handleRelocated(); 
-          }
-          
-        }, 150);
-      }, 30); 
-    });
-  }
+      
+      // 此时页面已经到了正确的位置，立刻向 DOM 注入高亮
+      const finalContents = rendition.getContents()[0];
+      if (finalContents) {
+        selectionOverlayRef.value?.renderAnnotationsForCurrentChapter(finalContents);
+      }
+    };
+
+    // ✨ 3. 并行执行：让“高负载任务”和“300ms 最短黑幕时间”一起跑！
+    // 这样就能完美吃掉高亮渲染时的 DOM 闪烁和可能的 CSS 过渡动画
+    await Promise.all([
+      performJumpAndRender(),
+      new Promise(resolve => setTimeout(resolve, 300)) 
+    ]);
+
+    // ✨ 4. 再次死等：确保 300ms 后，带高亮的最终排版已经被 GPU 彻底画好
+    await waitForPaint();
+
+  } catch (error) {
+    console.error("跳转失败:", error);
+  } finally {
+    // 5. 缓慢揭开黑幕 (对齐 jumpToTargetPage 的 0.2s 动画)
+    if (mask) {
+      mask.style.transition = 'opacity 0.2s ease';
+      mask.style.opacity = '0';
+      mask.style.pointerEvents = 'none';
+    }
+    
+    // 动画结束（200ms）后立马解锁进度雷达
+    setTimeout(() => { 
+      isJumpLocked = false; 
+      
+      // 主动呼叫雷达，扫描屏幕保存进度
+      if (rendition.getContents().length > 0) {
+        handleRelocated(); 
+      }
+    }, 200);
+  }
 };
 
 const loadAnnotationsTab = async () => {
