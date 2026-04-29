@@ -137,6 +137,12 @@ const props = defineProps({
 });
 
 const emit = defineEmits(['close']);
+// 🪄 强制等待浏览器完成一次真实屏幕绘制的黑魔法
+const waitForPaint = () => new Promise(resolve => {
+  requestAnimationFrame(() => {
+    requestAnimationFrame(resolve);
+  });
+});
 const clearTapTimer = () => {
   clearTimeout(tapActionTimer); // 兼顾电脑端（拆已有的炸弹）
   tapLock = true;               // 兼顾手机端（给接下来冒泡上来的事件上锁）
@@ -241,14 +247,16 @@ const applyTheme = () => {
 // ==========================================
 // === 新增：长宽比排版计算器 ===
 const handleWindowResize = () => {
-  if (!rendition || !maskRef.value) return;
+  if (!rendition) return;
 
-  // 1. 瞬间黑屏：打断过渡，强刷重排，拉下遮罩，开启物理防误触
+  // 1. 瞬间拉下黑幕，打断一切
   const mask = maskRef.value;
-  mask.style.transition = 'none';
-  mask.offsetHeight; // 🪄 强刷重排黑魔法
-  mask.style.opacity = '1';
-  mask.style.pointerEvents = 'auto';
+  if (mask) {
+    mask.style.transition = 'none';
+    mask.offsetHeight; 
+    mask.style.opacity = '1';
+    mask.style.pointerEvents = 'auto';
+  }
 
   // 2. 锁住雷达和菜单
   if (!isJumpLocked) {
@@ -258,9 +266,12 @@ const handleWindowResize = () => {
   
   clearTimeout(resizeTimer);
   
-  // 3. 防抖执行重排与空降
+  // 3. 窗口变动防抖 (600ms 等待用户拉伸结束)
   resizeTimer = setTimeout(async () => {
     try {
+      // ✨ 4. 在执行海量重排计算前，确认黑幕 100% 已经盖严实了
+      await waitForPaint();
+
       const w = window.innerWidth;
       const h = window.innerHeight;
       const targetSpread = (w >= 768 && (w / h) >= 1.25) ? 'auto' : 'none';
@@ -275,22 +286,31 @@ const handleWindowResize = () => {
       } else {
         await rendition.display(); 
       }
+
+      // 修正高亮错位
+      const contents = rendition.getContents()[0];
+      if (contents) {
+        selectionOverlayRef.value?.renderAnnotationsForCurrentChapter(contents);
+      }
+
     } catch (e) {
       console.warn("Resize error:", e);
     } finally {
-      // 4. 揭开遮罩：等下一帧 -> 等100ms绘制 -> 恢复动画 -> 揭开黑幕 -> 解锁雷达
-      requestAnimationFrame(() => {
-        setTimeout(() => {
-          mask.style.transition = 'opacity 0.3s ease';
-          mask.style.opacity = '0';
-          mask.style.pointerEvents = 'none';
-          
-          setTimeout(() => { isJumpLocked = false; }, 300);
-        }, 100); 
-      });
+      // ✨ 5. 确保底层复杂的图文重新排版已经彻底写入物理屏幕
+      await waitForPaint();
+
+      // ✨ 6. 缓慢揭开黑幕
+      if (mask) {
+        mask.style.transition = 'opacity 0.2s ease';
+        mask.style.opacity = '0';
+        mask.style.pointerEvents = 'none';
+      }
+      
+      setTimeout(() => { isJumpLocked = false; }, 300);
     }
   }, 600); 
 };
+
 onMounted(() => {
   initReader();
   // 监听屏幕旋转或窗口大小调整
@@ -816,6 +836,8 @@ const jumpToCfiAndClose = async (cfiOrHref) => {
 };
 
 const loadAnnotationsTab = async () => {
+  // 1. 瞬间切换 UI 并置顶。由于我们在 initReader 已经给 annotationsList.value 赋过初值，
+  // 此时面板会瞬间渲染出已有的旧数据，没有任何白屏等待。
   activeOverlayTab.value = 'annotations';
   import('vue').then(({ nextTick }) => {
     nextTick(() => {
@@ -823,8 +845,9 @@ const loadAnnotationsTab = async () => {
       if (scrollBox) scrollBox.scrollTop = 0;
     });
   });
+
+  // 2. 后台静默发起网络请求，拉取最新批注数据
   try {
-    // 假设你的后端按这个规范返回该书的所有勾画和批注
     const res = await fetch(`/api/books/${props.book.id}/annotations`, {
       headers: {
         'user-token': localStorage.getItem('geek_token') || '',
@@ -835,14 +858,16 @@ const loadAnnotationsTab = async () => {
     if (res.ok) {
       const resData = await res.json();
       if (resData.annotations && Array.isArray(resData.annotations)) {
+        // ✨ 3. 拿到最新数据后，直接覆盖响应式变量。
+        // Vue 会自动对比差异（Diff）并更新变动的部分，用户视觉上是无缝的。
         annotationsList.value = resData.annotations.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-      } else {
-        annotationsList.value = [];
+        
+        // 顺手把最新数据同步给划词组件，防止后续渲染高亮时用错旧数据
+        selectionOverlayRef.value?.setRawAnnotations(resData.annotations);
       }
     }
   } catch (e) {
-    console.warn("勾注数据拉取失败，尝试读取本地缓存", e);
-    // 可选：如果断网，可以在这里降级读取 localStorage 的数据
+    console.warn("最新勾注数据同步失败，继续使用本地缓存", e);
   }
 };
 
@@ -912,10 +937,17 @@ const loadSavedAnnotations = async (bookId, rendition) => {
     });
     const data = await res.json();
     if (data.status === 'success') {
-      // ✨ 1. 把所有章节的原始批注数据交给子组件缓存起来
+      // ✨ 修改点 1：在这里提前给列表赋值，并做好时间排序
+      if (data.annotations && Array.isArray(data.annotations)) {
+        annotationsList.value = data.annotations.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+      } else {
+        annotationsList.value = [];
+      }
+
+      // 1. 把所有章节的原始批注数据交给子组件缓存起来
       selectionOverlayRef.value?.setRawAnnotations(data.annotations);
       
-      // ✨ 2. 紧接着渲染当前（空降落地时）章节的批注
+      // 2. 紧接着渲染当前（空降落地时）章节的批注
       const contents = rendition.getContents()[0];
       if (contents) {
         selectionOverlayRef.value?.renderAnnotationsForCurrentChapter(contents);
@@ -1000,57 +1032,93 @@ const saveProgressToBackend = (cfi, progress) => {
 };
 
 // 🚀 极客空降法 (精简版)
-const jumpToTargetPage = () => {
+const jumpToTargetPage = async () => {
   const targetUnit = parseInt(inputPage.value);
   const total = parseInt(totalPages.value);
-
+  
+  // 1. 拦截不合法输入
   if (isNaN(targetUnit) || targetUnit < 0 || targetUnit > total) {
     inputPage.value = currentPage.value;
     return;
   }
   
-  if (unitMap.length > 0) {
-    const mapItem = unitMap.find(m => targetUnit >= m.start && targetUnit <= m.end);
-    if (mapItem) {
-      const preciseId = `unit-${targetUnit}`; // 只保留 unit-X 格式
-      const progress = targetUnit / total;
-      saveProgressToBackend(preciseId, progress); 
-      currentPage.value = targetUnit;
-      isJumpLocked = true;
-      if (viewer.value) viewer.value.style.opacity = '0'; // 隐身，掩盖二次刷新的动作
-
-      preciseDisplay(`${mapItem.href}#${preciseId}`).then(() => {
-        showBars.value = false;
-        if (viewer.value) viewer.value.style.opacity = '1'; // 现身
-        setTimeout(() => { isJumpLocked = false; }, 300);
-      });
-    }
+  // 2. 查找映射，找不到直接退出（避免深层嵌套）
+  const mapItem = unitMap.find(m => targetUnit >= m.start && targetUnit <= m.end);
+  if (!mapItem) return;
+  
+  const preciseId = `unit-${targetUnit}`; 
+  saveProgressToBackend(preciseId, targetUnit / total); 
+  currentPage.value = targetUnit;
+  isJumpLocked = true;
+  
+  // 3. 瞬间拉下物理黑幕
+  const mask = maskRef.value;
+  if (mask) {
+    mask.style.transition = 'none'; 
+    mask.offsetHeight;              
+    mask.style.opacity = '1';
+    mask.style.pointerEvents = 'auto';
   }
+  
+  // ✨ 4. 绝对死等：强迫浏览器把黑幕渲染到物理屏幕上
+  await waitForPaint();
+  
+  // 5. 并行执行“渲染空降”和“最短黑屏倒计时”
+  await Promise.all([
+    preciseDisplay(`${mapItem.href}#${preciseId}`),
+    new Promise(resolve => setTimeout(resolve, 300)) // ⏱️ 最短黑幕时间
+  ]);
+  
+  showBars.value = false;
+
+  // ✨ 6. 再次死等：确保空降后的底层排版已经彻底画好
+  await waitForPaint();
+
+  // 7. 缓慢揭开黑幕
+  if (mask) {
+    mask.style.transition = 'opacity 0.2s ease';
+    mask.style.opacity = '0';
+    mask.style.pointerEvents = 'none';
+  }
+  
+  // 8. 解锁进度雷达
+  setTimeout(() => { isJumpLocked = false; }, 300);
 };
 
 const cycleFontSize = async () => {
   const sizes = [80, 100, 120, 140];
   const currentIndex = sizes.indexOf(currentFontSize.value);
   currentFontSize.value = sizes[(currentIndex + 1) % sizes.length];
-  if (viewer.value) {  // 1. ✨ 开启蒙版隐身效果，并锁住雷达探测
-    viewer.value.style.transition = 'opacity 0.2s';
-    viewer.value.style.opacity = '0';
-  }
+
+  // 1. 仅保留雷达锁，防止排版剧烈抖动时触发错误的进度保存
   isJumpLocked = true; 
-  rendition.themes.fontSize(`${currentFontSize.value}%`);   // 2. ✨ 更改 Epub 内部字号
-  const targetUnit = currentPage.value;  // 3. ✨ 精确打击：利用你的 map 机制，找到当前所在的位置并强制空降
+
+  // 2. 核心：直接更改 Epub 内部字号，无任何视觉遮挡
+  rendition.themes.fontSize(`${currentFontSize.value}%`);   
+
+  // 3. 精确打击：强制空降回当前位置，防止字号改变导致页码错乱
+  const targetUnit = currentPage.value;  
   if (unitMap.length > 0 && targetUnit !== '-') {
     const mapItem = unitMap.find(m => targetUnit >= m.start && targetUnit <= m.end);
     if (mapItem) {
       const preciseId = `unit-${targetUnit}`;
       await preciseDisplay(`${mapItem.href}#${preciseId}`);
+      
+      // ✨ 修改点：空降完成后，排版已刷新，必须让子组件重新根据新坐标画一遍高亮
+      const contents = rendition.getContents()[0];
+      if (contents) {
+        selectionOverlayRef.value?.renderAnnotationsForCurrentChapter(contents);
+      }
     }
   }
-  setTimeout(() => {   // 4. ✨ 等待渲染稳固后，解除蒙版，解锁雷达
-    if (viewer.value) viewer.value.style.opacity = '1';
+
+  // 4. 等待 300ms 让内部排版彻底稳固后，解锁雷达
+  setTimeout(() => {
     isJumpLocked = false;
   }, 300);
-  fetch(`/api/books/${props.book.id}/prefs`, {  // 5. ✨ 将最新字号保存给后端（路径改为这本特定的书）
+
+  // 5. 将最新字号异步保存给后端
+  fetch(`/api/books/${props.book.id}/prefs`, { 
     method: 'POST',
     headers: { 
       'Content-Type': 'application/json',
