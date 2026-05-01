@@ -209,7 +209,7 @@ def _inject_sync_anchors(target_dir: str) -> int:
         start_unit = total_units
 
         # --- 这里是修改的核心部分：按页面从上到下的真实顺序统一打标 ---
-        elements = soup.find_all(['img', 'svg', 'image', 'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
+        elements = soup.find_all(['img', 'svg', 'image', 'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'a', 'li', 'div', 'span'])
         for el in elements:
             if el.name in ['img', 'svg', 'image']:
                 # 处理图片
@@ -225,6 +225,11 @@ def _inject_sync_anchors(target_dir: str) -> int:
                     text = text_node.text
                     if not text.strip(): continue
                     parent = text_node.parent
+                    parent_classes = parent.get('class', []) if parent else []
+                    if isinstance(parent_classes, str): parent_classes = [parent_classes]
+                    if 'sync-anchor' in parent_classes:
+                        continue
+
                     if parent and parent.name in ['ruby', 'rt', 'rp', 'pre', 'code']:
                         if not parent.has_attr('id'):
                             parent['id'] = f"unit-{total_units}"
@@ -233,6 +238,7 @@ def _inject_sync_anchors(target_dir: str) -> int:
                             parent['class'] = parent_classes + ['sync-anchor']
                             total_units += 1
                         continue
+                    
                     sentences = re.findall(r'[^。！？!?\.\…]+[。！？!?\.\…]+[”’"\'\)\]）】》]*|.+', text)
                     if not sentences: continue
                     fragment = soup.new_tag("span")

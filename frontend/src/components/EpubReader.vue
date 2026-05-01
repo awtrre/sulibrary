@@ -31,7 +31,7 @@
       ></div>
     </div>
 
-    <div v-show="showTocOverlay" class="fixed inset-0 bg-neutral-900 z-50 flex flex-col animate-fade-in">
+    <div v-show="showBars" class="absolute top-0 left-0 right-0 h-16 bg-neutral-900/95 backdrop-blur-md border-b border-neutral-800 flex justify-between items-center px-6 z-40 transition-transform duration-300 animate-fade-in">
       <button @click="$emit('close')" class="text-neutral-400 hover:text-white text-sm tracking-widest font-mono transition-colors z-10">
         ❮ BACK
       </button>
@@ -308,10 +308,8 @@ const handleWindowResize = () => {
   
   clearTimeout(resizeTimer);
   
-  // 3. 窗口变动防抖 (600ms 等待用户拉伸结束)
   resizeTimer = setTimeout(async () => {
     try {
-      // ✨ 4. 在执行海量重排计算前，确认黑幕 100% 已经盖严实了
       await waitForPaint();
 
       const w = window.innerWidth;
@@ -329,31 +327,44 @@ const handleWindowResize = () => {
         await rendition.display(); 
       }
 
-      // 修正高亮错位
+      // ✨ 核心修复 1：加上 await，强迫主线程等待划词组件算完坐标！
       const contents = rendition.getContents()[0];
       if (contents) {
-        selectionOverlayRef.value?.renderAnnotationsForCurrentChapter(contents);
+        await selectionOverlayRef.value?.renderAnnotationsForCurrentChapter(contents);
+        // ✨ 核心修复 2：亲眼看着物理屏幕把带颜色的高亮画好
+        await waitForPaint(contents); 
       }
+
+      // 安全缓冲，给 Vue 留出最后一点消化 DOM 的时间
+      await new Promise(resolve => setTimeout(resolve, 150));
+
+      // ✨ 核心修复 3：在黑幕揭开前，提前解锁并强行扫雷！
+      // 此时还在黑屏状态，我们让雷达在暗中重新扫描排版，
+      // 这会让 visibleUnitRange 立刻更新，书签图标（isCurrentBookmarked）也会在黑暗中点亮。
+      isJumpLocked = false;
+      handleRelocated(); 
+      
+      // 等待 Vue 把书签图标的 DOM 状态更新完
+      await nextTick(); 
 
     } catch (e) {
       console.warn("Resize error:", e);
+      isJumpLocked = false;
     } finally {
-      // ✨ 5. 确保底层复杂的图文重新排版已经彻底写入物理屏幕
+      // 再次死等主窗口重绘
       await waitForPaint();
 
-      // ✨ 6. 缓慢揭开黑幕
+      // ✨ 最后：缓慢揭开黑幕。此时排版、高亮、书签图标全都是最终形态，绝对不闪！
       if (mask) {
         mask.style.transition = 'opacity 0.2s ease';
         mask.style.opacity = '0';
         mask.style.pointerEvents = 'none';
       }
       
-      setTimeout(() => {
-         isJumpLocked = false;
-      }, 300);
+      // 之前这里的 setTimeout 已经被我们拆解并提前到上面去执行了，直接删掉！
     }
-  }, 600); 
-};
+  }, 600);
+}
 
 onMounted(() => {
   initReader();
@@ -889,26 +900,19 @@ const openTocOverlay = async () => {
   }
 
   tocList.value = flatList;
-
-  // ✨ 利用 nextTick 等待 DOM 渲染出高亮标记后，执行瞬间滚动
-  // ✨ 利用 nextTick 等待 DOM 渲染后，执行位置归位
-  // 原有的 openTocOverlay 底部的 nextTick
-  import('vue').then(({ nextTick }) => {
-    nextTick(() => {
-      if (activeOverlayTab.value === 'toc') {
-        // ✨ 新增判断：如果还没滚动过，才执行滚动
-        if (!hasScrolledToActiveToc) {
-          const activeEl = document.getElementById('active-toc-item');
-          if (activeEl) {
-            activeEl.scrollIntoView({ behavior: 'instant', block: 'center' });
-            hasScrolledToActiveToc = true; // ✨ 滚动完立马锁上
-          }
+  nextTick(() => {
+    if (activeOverlayTab.value === 'toc') {
+      if (!hasScrolledToActiveToc) {
+        const activeEl = document.getElementById('active-toc-item');
+        if (activeEl) {
+          activeEl.scrollIntoView({ behavior: 'instant', block: 'center' });
+          hasScrolledToActiveToc = true; 
         }
-      } else {
-        const scrollBox = document.querySelector('.overflow-y-auto');
-        if (scrollBox) scrollBox.scrollTop = 0;
       }
-    });
+    } else {
+      const scrollBox = document.querySelector('.overflow-y-auto');
+      if (scrollBox) scrollBox.scrollTop = 0;
+    }
   });
 };
 
@@ -992,11 +996,9 @@ const loadAnnotationsTab = async () => {
   // 1. 瞬间切换 UI 并置顶。由于我们在 initReader 已经给 annotationsList.value 赋过初值，
   // 此时面板会瞬间渲染出已有的旧数据，没有任何白屏等待。
   activeOverlayTab.value = 'annotations';
-  import('vue').then(({ nextTick }) => {
-    nextTick(() => {
-      const scrollBox = document.querySelector('.overflow-y-auto');
-      if (scrollBox) scrollBox.scrollTop = 0;
-    });
+  nextTick(() => {
+    const scrollBox = document.querySelector('.overflow-y-auto');
+    if (scrollBox) scrollBox.scrollTop = 0;
   });
 
   // 2. 后台静默发起网络请求，拉取最新批注数据
@@ -1027,16 +1029,13 @@ const loadAnnotationsTab = async () => {
 const switchToTocTab = () => {
   activeOverlayTab.value = 'toc';
   
-  // ✨ 新增判断：只有在没被滚动过的情况下，才去执行寻址和滚动
   if (!hasScrolledToActiveToc) {
-    import('vue').then(({ nextTick }) => {
-      nextTick(() => {
-        const activeEl = document.getElementById('active-toc-item');
-        if (activeEl) {
-          activeEl.scrollIntoView({ behavior: 'instant', block: 'center' });
-          hasScrolledToActiveToc = true; // ✨ 滚动完立马锁上
-        }
-      });
+    nextTick(() => {
+      const activeEl = document.getElementById('active-toc-item');
+      if (activeEl) {
+        activeEl.scrollIntoView({ behavior: 'instant', block: 'center' });
+        hasScrolledToActiveToc = true; 
+      }
     });
   }
 };
