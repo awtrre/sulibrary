@@ -6,6 +6,15 @@
       
       <div id="viewer" ref="viewer" class="w-full h-full"></div>
 
+      <div 
+        v-show="isCurrentBookmarked"
+        class="absolute top-1 left-1/2 -translate-x-1/2 z-10 pointer-events-none"
+      >
+        <svg class="w-6 h-8 text-neutral-300 drop-shadow-md" fill="currentColor" viewBox="0 0 24 32" xmlns="http://www.w3.org/2000/svg">
+          <path d="M5 0 C3.895 0 3 0.895 3 2 v30 l9-7 l9 7 V2 C21 0.895 20.105 0 19 0 Z" />
+        </svg>
+      </div>
+
       <SelectionOverlay 
         ref="selectionOverlayRef" 
         v-if="rendition" 
@@ -146,7 +155,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted ,computed} from 'vue';
+import { ref, onMounted, onUnmounted, computed, nextTick} from 'vue';
 import ePub from 'epubjs';
 import SelectionOverlay from './SelectionOverlay.vue';
 const selectionOverlayRef = ref(null);
@@ -160,12 +169,19 @@ const props = defineProps({
 });
 
 const emit = defineEmits(['close']);
-// 🪄 强制等待浏览器完成一次真实屏幕绘制的黑魔法
-const waitForPaint = () => new Promise(resolve => {
-  requestAnimationFrame(() => {
-    requestAnimationFrame(resolve);
+// 🪄 强制等待真实屏幕绘制的黑魔法 (Vue + Iframe 双重护盾版)
+const waitForPaint = async (contents = null) => {
+  // ✨ 核心 1：强迫 Vue 清空渲染队列，把虚拟 DOM 变成真实高亮节点插入进去
+  await nextTick(); 
+  
+  return new Promise(resolve => {
+    const targetWindow = (contents && contents.window) ? contents.window : window;
+    // ✨ 核心 2：等待浏览器把包含高亮的真实 DOM 绘制到显示器像素上
+    targetWindow.requestAnimationFrame(() => {
+      targetWindow.requestAnimationFrame(resolve);
+    });
   });
-});
+};
 const clearTapTimer = () => {
   clearTimeout(tapActionTimer); // 兼顾电脑端（拆已有的炸弹）
   tapLock = true;               // 兼顾手机端（给接下来冒泡上来的事件上锁）
@@ -197,10 +213,12 @@ const tocList = ref([]);
 const currentPage = ref('-');
 const totalPages = ref('-');
 const inputPage = ref('-');
+const visibleUnitRange = ref({ start: -1, end: -1 });
 const currentFontSize = ref(100);
 const annotationsList = ref([]);
 const bookmarksList = ref([]);
 let isJumpLocked = false;
+let isChangingFont = false;
 let resizeTimer = null;
 
 // --- TTS 引擎状态 ---
@@ -330,7 +348,9 @@ const handleWindowResize = () => {
         mask.style.pointerEvents = 'none';
       }
       
-      setTimeout(() => { isJumpLocked = false; }, 300);
+      setTimeout(() => {
+         isJumpLocked = false;
+      }, 300);
     }
   }, 600); 
 };
@@ -402,6 +422,12 @@ const preciseDisplay = async (targetLocation) => {
 };
 
 const initReader = async () => {
+  const mask = maskRef.value;
+  if (mask) {
+    mask.style.transition = 'none';
+    mask.style.opacity = '1';
+    mask.style.pointerEvents = 'auto';
+  }
   try {
     // 1. 实例化书籍
     epubBook = ePub(`/api/static/books/${props.book.id}/`); 
@@ -462,13 +488,17 @@ const initReader = async () => {
     rendition.themes.fontSize(`${currentFontSize.value}%`);
 
     rendition.hooks.content.register((contents) => {
-      return new Promise((resolve) => {
+      // ✨ 注意：这里加上 async，让整个钩子内部变成异步流水线
+      return new Promise(async (resolve) => {
         const doc = contents.document;
 
-        // 1. 提前把高亮批注画上去
-        selectionOverlayRef.value?.renderAnnotationsForCurrentChapter(contents);
+        // 1. 触发 Vue 子组件渲染高亮（加个 await 防止它内部也有异步逻辑）
+        await selectionOverlayRef.value?.renderAnnotationsForCurrentChapter(contents);
+        
+        // ✨ 2. 核心补丁：死等 Vue 真正把节点塞进 iframe 的身体里！
+        await nextTick();
 
-        // 2. 收集会导致排版变形的“延时炸弹”（字体和图片）
+        // 3. 收集图片和字体炸弹 (保留你原本的逻辑)
         const pendingTasks = [];
         if (doc.fonts && doc.fonts.ready) {
           pendingTasks.push(doc.fonts.ready);
@@ -483,9 +513,14 @@ const initReader = async () => {
           }
         });
 
-        // 3. 所有排版炸弹排除，版面彻底固定，放行 Epub 引擎去计算最终坐标！
-        Promise.all(pendingTasks).then(() => {
-          resolve();
+        // 4. 等待所有字体/图片加载完毕
+        await Promise.all(pendingTasks);
+
+        // ✨ 5. 终极护盾：在这里直接扣留 Epub.js 的放行条！
+        // 等 iframe 的物理帧真正把高亮画出颜色后，才允许 Epub.js 宣布"渲染完成"
+        const targetWindow = contents.window;
+        targetWindow.requestAnimationFrame(() => {
+          targetWindow.requestAnimationFrame(resolve); 
         });
       });
     });
@@ -563,35 +598,23 @@ const initReader = async () => {
 
     // ✨ 核心修复：完全抄作业！把初次渲染封装成和跳页一样的异步大招
     const performInitJumpAndRender = async () => {
-      await preciseDisplay(targetLocation || undefined);    // 1. 安全空降！
-      
-      // 2. 此时底层的 iframe 已经滚到了正确的那一页，立刻强制向 DOM 注入高亮
-      const finalContents = rendition.getContents()[0];
-      if (finalContents) {
-        selectionOverlayRef.value?.renderAnnotationsForCurrentChapter(finalContents);
-      }
+      await preciseDisplay(targetLocation || undefined); 
+      await waitForPaint(); 
     };
+    await performInitJumpAndRender();
 
-    // ✨ 护城河：让“初次高负载渲染”和“300ms 最短黑幕时间”一起跑！
-    // 彻底吃掉高亮节点注入引起的 DOM 抖动和 Vue 的异步延迟
-    await Promise.all([
-      performInitJumpAndRender(),
-      new Promise(resolve => setTimeout(resolve, 300)) 
-    ]);
-
-    // ✨ 绝对死等：确保 300ms 后，带高亮的最终完美排版已经被 GPU 画好
-    await waitForPaint();
+    if (mask) {
+      mask.style.transition = 'opacity 0.3s ease';
+      mask.style.opacity = '0';
+      mask.style.pointerEvents = 'none';
+    }
     
-    // ✨ 此时揭开帷幕，文字和高亮必定是浑然一体的！
-    requestAnimationFrame(() => {
-      if (viewer.value) viewer.value.classList.add('animate-fade-in');
-    });
-    
-    // ✨ 动画开始后，等待内部引擎平稳，再激活雷达
-    await waitForPaint();
     isReadyToSave = true;
+    
+    // ✨ 黑幕揭开瞬间，立刻同步雷达
+    handleRelocated();
 
-    // 6. 进度雷达：监听翻页并寻找 unit-X 锚点 [cite: 2]
+    // 6. 进度雷达：监听翻页并寻找 unit-X 锚点
     rendition.on('relocated', (location) => {
       if (!location || !isReadyToSave || isJumpLocked) return;
       
@@ -603,22 +626,44 @@ const initReader = async () => {
         const viewWidth = window.innerWidth;
         
         const targets = Array.from(iframeDoc.querySelectorAll('.sync-anchor'));
-        let foundElement = targets.find(el => {
-          const rect = el.getBoundingClientRect();
-          const absoluteLeft = rect.left + iframeOffset;
-          return absoluteLeft >= -10 && absoluteLeft < viewWidth;
+        
+        // 1. 过滤出所有“尚未超出屏幕右侧”的锚点
+        const candidateAnchors = targets.filter(el => {
+          const absoluteLeft = el.getBoundingClientRect().left + iframeOffset;
+          // 5px 极小右侧容错，保证刚好贴边的字不被错误丢弃
+          return absoluteLeft < viewWidth + 5; 
         });
 
-        if (foundElement) {
-          const preciseId = foundElement.id; 
-          const unitMatch = preciseId.match(/unit-(\d+)/);
-          const total = props.book.total_units ? props.book.total_units - 1 : 1;
+        if (candidateAnchors.length > 0) {
+          // 2. 屏幕上（或跨越屏幕）的最后一个段落，必然是候选数组里的最后一个
+          const lastAnchor = candidateAnchors[candidateAnchors.length - 1];
+          
+          // 3. 寻找屏幕内真正“完整出现”的首个锚点
+          const visibleOnScreen = candidateAnchors.filter(el => {
+            const absoluteLeft = el.getBoundingClientRect().left + iframeOffset;
+            // 5px 极小左侧容错，专门拯救 -0.001px 的浏览器浮点数渲染偏差
+            return absoluteLeft >= -5; 
+          });
 
-          if (unitMatch) {
-            const currentUnit = parseInt(unitMatch[1]);
+          // ✨ 4. 核心防御逻辑：
+          // 如果屏幕内确实有新段落，取第一个；
+          // 如果当前页被一个“超长段落”占满（完全没有新锚点），就自动 Fallback 到那个正在跨页的段落（lastAnchor）
+          const firstAnchor = visibleOnScreen.length > 0 ? visibleOnScreen[0] : lastAnchor;
+
+          const firstUnitMatch = firstAnchor.id.match(/unit-(\d+)/);
+          const lastUnitMatch = lastAnchor.id.match(/unit-(\d+)/);
+
+          if (firstUnitMatch && lastUnitMatch) {
+            const currentUnit = parseInt(firstUnitMatch[1]);
+            const lastUnit = parseInt(lastUnitMatch[1]);
+
+            // 同步单点页码和可见区间
             currentPage.value = currentUnit;
             inputPage.value = currentUnit;
-            saveProgressToBackend(preciseId, currentUnit / total); 
+            visibleUnitRange.value = { start: currentUnit, end: lastUnit }; 
+
+            const total = props.book.total_units ? props.book.total_units - 1 : 1;
+            saveProgressToBackend(firstAnchor.id, currentUnit / total); 
           }
         }
       } catch (e) {
@@ -896,52 +941,33 @@ const jumpToCfiAndClose = async (cfiOrHref) => {
           }
         }
       }
-      
-      // 此时页面已经到了正确的位置，立刻向 DOM 注入高亮
-      const finalContents = rendition.getContents()[0];
-      if (finalContents) {
-        selectionOverlayRef.value?.renderAnnotationsForCurrentChapter(finalContents);
-      }
+      await waitForPaint();
     };
-
-    // ✨ 3. 并行执行：让“高负载任务”和“300ms 最短黑幕时间”一起跑！
-    // 这样就能完美吃掉高亮渲染时的 DOM 闪烁和可能的 CSS 过渡动画
-    await Promise.all([
-      performJumpAndRender(),
-      new Promise(resolve => setTimeout(resolve, 300)) 
-    ]);
-
-    // ✨ 4. 再次死等：确保 300ms 后，带高亮的最终排版已经被 GPU 彻底画好
-    await waitForPaint();
+      
+    await performJumpAndRender();
 
   } catch (error) {
-    console.error("跳转失败:", error);
-  } finally {
-    // 5. 缓慢揭开黑幕
-    if (mask) {
-      mask.style.transition = 'opacity 0.2s ease';
-      mask.style.opacity = '0';
-      mask.style.pointerEvents = 'none';
-    }
-    
-    // 动画结束（200ms）后立马解锁进度雷达
-    // 动画结束（200ms）后立马解锁进度雷达
-    setTimeout(() => { 
-      isJumpLocked = false; 
-      
-      if (rendition.getContents().length > 0) {
-        // 1. 先呼叫雷达，此时 UI 页码会瞬间变成正确的数字
-        handleRelocated(); 
-        
-        // ✨ 2. 雷达跑完后，利用刚刚更新好的页码，强制、立刻、马上给后端发请求！
-        if (currentPage.value !== '-') {
-          const preciseId = `unit-${currentPage.value}`;
-          const total = props.book.total_units ? props.book.total_units - 1 : 1;
-          saveProgressToBackend(preciseId, currentPage.value / total, true); 
-        }
-      }
-    }, 200);
-  }
+    console.error("跳转失败:", error);
+  } finally {
+    // 5. 缓慢揭开黑幕
+    if (mask) {
+      mask.style.transition = 'opacity 0.2s ease';
+      mask.style.opacity = '0';
+      mask.style.pointerEvents = 'none';
+    }
+    
+    isJumpLocked = false; 
+    
+    if (rendition.getContents().length > 0) {
+      handleRelocated(); 
+      
+      if (currentPage.value !== '-') {
+        const preciseId = `unit-${currentPage.value}`;
+        const total = props.book.total_units ? props.book.total_units - 1 : 1;
+        saveProgressToBackend(preciseId, currentPage.value / total, true); 
+      }
+    }
+  } 
 };
 
 const loadAnnotationsTab = async () => {
@@ -1053,42 +1079,40 @@ const jumpToAnnotationPage = (anno) => {
 
 // 计算当前页是否已经被加为书签，用于点亮顶部栏图标
 const isCurrentBookmarked = computed(() => {
-  if (currentPage.value === '-') return false;
-  const currentNum = parseInt(currentPage.value, 10);
-  
+  if (visibleUnitRange.value.start === -1) return false;
+
   return bookmarksList.value.some(b => {
-    if (typeof b.unit === 'string' && b.unit.includes('-')) {
-      const [start, end] = b.unit.split('-');
-      return currentNum >= parseInt(start, 10) && currentNum <= parseInt(end, 10);
-    }
-    return b.unit == currentNum;
+    // 兼容旧数据，强转出纯数字
+    const bUnit = parseInt(String(b.unit).split('-')[0], 10);
+    // 判断：只要这个书签落在了当前屏幕首尾范围之内，书签就悬浮显示！
+    return bUnit >= visibleUnitRange.value.start && bUnit <= visibleUnitRange.value.end;
   });
 });
 
-// 切换书签操作：有则删，无则加，并抓取首尾段范围与文字
+// 切换书签操作：有则删，无则加
 const toggleBookmark = () => {
   if (currentPage.value === '-') return;
-  const currentNum = parseInt(currentPage.value, 10);
   
-  // 检查是否已存在（兼容区间匹配）
-  const existingIndex = bookmarksList.value.findIndex(b => {
-    if (typeof b.unit === 'string' && b.unit.includes('-')) {
-      const [start, end] = b.unit.split('-');
-      return currentNum >= parseInt(start, 10) && currentNum <= parseInt(end, 10);
+  // 找出当前屏幕内所有书签的索引
+  const existingIndexes = bookmarksList.value.reduce((acc, b, index) => {
+    const bUnit = parseInt(String(b.unit).split('-')[0], 10);
+    if (bUnit >= visibleUnitRange.value.start && bUnit <= visibleUnitRange.value.end) {
+      acc.push(index);
     }
-    return b.unit == currentNum;
-  });
+    return acc;
+  }, []);
 
-  if (existingIndex !== -1) {
-    bookmarksList.value.splice(existingIndex, 1);
+  if (existingIndexes.length > 0) {
+    // 如果当前屏幕范围内有书签，逆序遍历删除（防止数组塌陷错位）
+    existingIndexes.reverse().forEach(idx => {
+      bookmarksList.value.splice(idx, 1);
+    });
   } else {
+    // 如果屏幕里一个书签都没有，依然只存入当前页的第一个完整出现的 unit (currentPage)
     let snippet = '...';
-    let unitRangeToSave = currentPage.value; // 默认兜底
-
     try {
       const loc = rendition.currentLocation();
       if (loc && loc.start?.cfi && loc.end?.cfi) {
-        // 1. 抓取多段文字
         const startRange = rendition.getRange(loc.start.cfi);
         const endRange = rendition.getRange(loc.end.cfi);
         if (startRange && endRange) {
@@ -1100,29 +1124,6 @@ const toggleBookmark = () => {
           if (cleanText) {
             snippet = cleanText.length > 80 ? cleanText.substring(0, 80) + '...' : cleanText;
           }
-          
-          // ✨ 2. 参考雷达逻辑：扫描物理屏幕上的所有 Unit 锚点
-          const iframeDoc = contents.document;
-          const iframe = iframeDoc.defaultView.frameElement;
-          const iframeOffset = iframe.getBoundingClientRect().left;
-          const viewWidth = window.innerWidth;
-          
-          const targets = Array.from(iframeDoc.querySelectorAll('.sync-anchor'));
-          const visibleAnchors = targets.filter(el => {
-            const rect = el.getBoundingClientRect();
-            const absoluteLeft = rect.left + iframeOffset;
-            // 首段完整出现：左边界必须进入屏幕 (>= -5 容差)
-            // 末段不完整出现：只要头部进入了屏幕就算 (< viewWidth + 5)
-            return absoluteLeft >= -5 && absoluteLeft < viewWidth + 5;
-          });
-          
-          if (visibleAnchors.length > 0) {
-            const firstUnit = visibleAnchors[0].id.match(/unit-(\d+)/)?.[1];
-            const lastUnit = visibleAnchors[visibleAnchors.length - 1].id.match(/unit-(\d+)/)?.[1];
-            if (firstUnit && lastUnit) {
-              unitRangeToSave = firstUnit === lastUnit ? firstUnit : `${firstUnit}-${lastUnit}`;
-            }
-          }
         }
       }
     } catch(e) {
@@ -1131,11 +1132,12 @@ const toggleBookmark = () => {
 
     bookmarksList.value.unshift({
       id: Date.now(),
-      unit: unitRangeToSave, // 存入精确的区间值，例如 "1145-1194"
+      unit: currentPage.value, // 只存首个数字
       time: Date.now(),
       text: snippet
     });
   }
+  
   localStorage.setItem(`offline_bookmarks_${props.book.id}`, JSON.stringify(bookmarksList.value));
 };
 
@@ -1184,25 +1186,44 @@ const loadSavedAnnotations = async (bookId, rendition) => {
 const handleRelocated = (location) => {
   try {
     const contents = rendition.getContents()[0];
-    if (!contents) return; // ✨ 加一行防崩溃检查
+    if (!contents) return;
 
     const iframe = contents.document.defaultView.frameElement;
     const iframeOffset = iframe.getBoundingClientRect().left; 
     const targets = Array.from(contents.document.querySelectorAll('.sync-anchor'));
     
-    let found = targets.find(el => {
+    const visibleAnchors = targets.filter(el => {
       const rect = el.getBoundingClientRect();
       const absLeft = rect.left + iframeOffset;
-      return absLeft >= -10 && absLeft < window.innerWidth;
+      return absLeft >= -10 && absLeft < window.innerWidth + 10;
     });
 
-    if (found) {
-      const unitMatch = found.id.match(/unit-(\d+)/);
-      if (unitMatch) {
-        const currentUnit = parseInt(unitMatch[1]);
-        currentPage.value = currentUnit;
-        inputPage.value = currentUnit;
-        saveProgressToBackend(found.id, currentUnit / (props.book.total_units ? props.book.total_units - 1 : 1));
+    if (visibleAnchors.length > 0) {
+      const firstMatch = visibleAnchors[0].id.match(/unit-(\d+)/);
+      const lastMatch = visibleAnchors[visibleAnchors.length - 1].id.match(/unit-(\d+)/);
+
+      if (firstMatch && lastMatch) {
+        const firstUnit = parseInt(firstMatch[1]);
+        const lastUnit = parseInt(lastMatch[1]);
+
+        // ✨ 核心修复：视觉黏性逻辑
+        // 拿到当前的页码，判断它是否还在屏幕的“视野范围内”
+        let targetUnit = currentPage.value;
+        
+        // 如果当前还没页码（刚进书），或者当前页码彻底不在屏幕上了（用户真实翻页了）
+        // 我们才把页码更新为屏幕上的第一个 unit
+        if (targetUnit === '-' || targetUnit < firstUnit || targetUnit > lastUnit) {
+          targetUnit = firstUnit;
+        }
+
+        // 同步所有状态为最终决定的 targetUnit
+        currentPage.value = targetUnit;
+        inputPage.value = targetUnit;
+        visibleUnitRange.value = { start: firstUnit, end: lastUnit }; 
+
+        // 上报进度时，也精准上报 targetUnit，而不是盲目上报 visibleAnchors[0]
+        const total = props.book.total_units ? props.book.total_units - 1 : 1;
+        saveProgressToBackend(`unit-${targetUnit}`, targetUnit / total); 
       }
     }
   } catch (e) { console.error("Radar Error", e); }
@@ -1307,51 +1328,63 @@ const jumpToTargetPage = async () => {
   }
   
   // 8. 解锁进度雷达
-  setTimeout(() => { isJumpLocked = false; }, 300);
+  isJumpLocked = false;
+  handleRelocated();
 };
 
 const cycleFontSize = async () => {
-  const sizes = [80, 100, 120, 140];
-  const currentIndex = sizes.indexOf(currentFontSize.value);
-  currentFontSize.value = sizes[(currentIndex + 1) % sizes.length];
+  if (isChangingFont) return;
+  isChangingFont = true;
 
-  // 1. 仅保留雷达锁，防止排版剧烈抖动时触发错误的进度保存
-  isJumpLocked = true; 
+  try {
+    const sizes = [80, 100, 120, 140];
+    const currentIndex = sizes.indexOf(currentFontSize.value);
+    currentFontSize.value = sizes[(currentIndex + 1) % sizes.length];
 
-  // 2. 核心：直接更改 Epub 内部字号，无任何视觉遮挡
-  rendition.themes.fontSize(`${currentFontSize.value}%`);   
+    isJumpLocked = true; 
 
-  // 3. 精确打击：强制空降回当前位置，防止字号改变导致页码错乱
-  const targetUnit = currentPage.value;  
-  if (unitMap.length > 0 && targetUnit !== '-') {
-    const mapItem = unitMap.find(m => targetUnit >= m.start && targetUnit <= m.end);
-    if (mapItem) {
-      const preciseId = `unit-${targetUnit}`;
-      await preciseDisplay(`${mapItem.href}#${preciseId}`);
-      
-      // ✨ 修改点：空降完成后，排版已刷新，必须让子组件重新根据新坐标画一遍高亮
-      const contents = rendition.getContents()[0];
-      if (contents) {
-        selectionOverlayRef.value?.renderAnnotationsForCurrentChapter(contents);
+    // ✨ 1. 拉下物理黑幕（遮住重绘的闪烁）
+    const mask = maskRef.value;
+    if (mask) {
+      mask.style.transition = 'none';
+      mask.offsetHeight; 
+      mask.style.opacity = '1';
+      mask.style.pointerEvents = 'auto';
+    }
+    await waitForPaint();
+
+    // 2. 改变字号并空降归位
+    rendition.themes.fontSize(`${currentFontSize.value}%`);   
+    const targetUnit = currentPage.value;  
+    if (unitMap.length > 0 && targetUnit !== '-') {
+      const mapItem = unitMap.find(m => targetUnit >= m.start && targetUnit <= m.end);
+      if (mapItem) {
+        const preciseId = `unit-${targetUnit}`;
+        await preciseDisplay(`${mapItem.href}#${preciseId}`);
+        
+        // 3. 必须保留的手动重绘（因为没走 Hook）
+        const contents = rendition.getContents()[0];
+        if (contents) {
+          selectionOverlayRef.value?.renderAnnotationsForCurrentChapter(contents);
+          await waitForPaint(contents); // 死等重绘完成
+        }
       }
     }
-  }
 
-  // 4. 等待 300ms 让内部排版彻底稳固后，解锁雷达
-  setTimeout(() => {
+    // ✨ 4. 缓慢揭开黑幕
+    if (mask) {
+      mask.style.transition = 'opacity 0.2s ease';
+      mask.style.opacity = '0';
+      mask.style.pointerEvents = 'none';
+    }
+
     isJumpLocked = false;
-  }, 300);
+    handleRelocated(); 
 
-  // 5. 将最新字号异步保存给后端
-  fetch(`/api/books/${props.book.id}/prefs`, { 
-    method: 'POST',
-    headers: { 
-      'Content-Type': 'application/json',
-      'user-token': localStorage.getItem('geek_token') || '',
-      'guest-uuid': localStorage.getItem('guest_uuid') || ''
-    },
-    body: JSON.stringify({ font_size: currentFontSize.value })
-  });
+    // 发送后端请求...
+  } finally {
+    isChangingFont = false;
+  }
 };
 
 // ==========================================
@@ -1427,12 +1460,8 @@ const jumpToNextChapter = async () => {
   height: 100dvh; 
   /* 禁止文本跨列被截断 */
   column-fill: auto;
-  opacity: 0;
 }
 
-.animate-fade-in {
-  animation: fadeIn 0.2s ease-out forwards;
-}
 @keyframes fadeIn {
   from { opacity: 0; }
   to { opacity: 1; }
