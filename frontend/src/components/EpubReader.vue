@@ -1,13 +1,12 @@
 <template>
-  <div ref="maskRef" class="mask"></div>
   <div class="fixed inset-0 bg-neutral-900 text-neutral-100 flex overflow-hidden z-50 font-sans select-none">
     
     <div class="relative h-full flex-grow border-r border-neutral-800 bg-black flex items-center justify-center overflow-hidden" ref="readerMain">
-      
+      <div ref="maskRef" class="mask"></div>
       <div id="viewer" ref="viewer" class="w-full h-full"></div>
 
       <div 
-        v-show="isCurrentBookmarked"
+        v-show="isCurrentBookmarked && !isTurningPage"
         class="absolute top-1 left-1/2 -translate-x-1/2 z-10 pointer-events-none"
       >
         <svg class="w-6 h-8 text-neutral-300 drop-shadow-md" fill="currentColor" viewBox="0 0 24 32" xmlns="http://www.w3.org/2000/svg">
@@ -219,6 +218,7 @@ const annotationsList = ref([]);
 const bookmarksList = ref([]);
 let isJumpLocked = false;
 let isChangingFont = false;
+const isTurningPage = ref(false);
 let resizeTimer = null;
 
 // --- TTS 引擎状态 ---
@@ -292,13 +292,7 @@ const handleWindowResize = () => {
   if (!rendition) return;
 
   // 1. 瞬间拉下黑幕，打断一切
-  const mask = maskRef.value;
-  if (mask) {
-    mask.style.transition = 'none';
-    mask.offsetHeight; 
-    mask.style.opacity = '1';
-    mask.style.pointerEvents = 'auto';
-  }
+  toggleMask(true, { type: 'local' });
 
   // 2. 锁住雷达和菜单
   if (!isJumpLocked) {
@@ -355,11 +349,7 @@ const handleWindowResize = () => {
       await waitForPaint();
 
       // ✨ 最后：缓慢揭开黑幕。此时排版、高亮、书签图标全都是最终形态，绝对不闪！
-      if (mask) {
-        mask.style.transition = 'opacity 0.2s ease';
-        mask.style.opacity = '0';
-        mask.style.pointerEvents = 'none';
-      }
+      toggleMask(false, { type: 'local' });
       
       // 之前这里的 setTimeout 已经被我们拆解并提前到上面去执行了，直接删掉！
     }
@@ -433,12 +423,7 @@ const preciseDisplay = async (targetLocation) => {
 };
 
 const initReader = async () => {
-  const mask = maskRef.value;
-  if (mask) {
-    mask.style.transition = 'none';
-    mask.style.opacity = '1';
-    mask.style.pointerEvents = 'auto';
-  }
+  toggleMask(true, { type: 'global' });
   try {
     // 1. 实例化书籍
     epubBook = ePub(`/api/static/books/${props.book.id}/`); 
@@ -627,11 +612,7 @@ const initReader = async () => {
     await performInitJumpAndRender();
 
     // 4. 缓慢揭开黑幕
-    if (mask) {
-      mask.style.transition = 'opacity 0.3s ease';
-      mask.style.opacity = '0';
-      mask.style.pointerEvents = 'none';
-    }
+    toggleMask(false, { type: 'global' });
     
     isReadyToSave = true;
     
@@ -692,6 +673,9 @@ const initReader = async () => {
         }
       } catch (e) {
         console.error("💥 雷达程序崩溃:", e);
+      } finally {
+        // ✨ 必须在这里加上重置！新页面排版落稳了，把书签放出来
+        isTurningPage.value = false;
       }
     });
 
@@ -792,8 +776,10 @@ const setupIframeClick = () => {
       
       // 5. 按照绝对的三等分区域进行判断，彻底打通任督二脉！
       if (absoluteX < screenWidth * 0.3) {
+        isTurningPage.value = true;
         rendition.prev();
       } else if (absoluteX > screenWidth * 0.7) {
+        isTurningPage.value = true;
         rendition.next();
       } else {
         showBars.value = !showBars.value; 
@@ -814,8 +800,10 @@ const handleTouch = (event) => {
   const width = rect.width;
   if (showTocOverlay.value || selectionOverlayRef.value?.isAnyUIOpen()) return;
   if (clickX < width * 0.3) {
+    isTurningPage.value = true;
     rendition.prev();
   } else if (clickX > width * 0.7) {
+    isTurningPage.value = true;
     rendition.next();
   } else {
     showBars.value = !showBars.value;
@@ -923,13 +911,7 @@ const jumpToCfiAndClose = async (cfiOrHref) => {
   // ✨ 先让主线程有空把面板隐藏掉
   await nextTick(); 
 
-  const mask = maskRef.value;
-  if (mask) {
-    mask.style.transition = 'none';
-    mask.offsetHeight; 
-    mask.style.opacity = '1';
-    mask.style.pointerEvents = 'auto';
-  }
+  toggleMask(true, { type: 'global' });
   isJumpLocked = true; 
 
   await waitForPaint();
@@ -973,11 +955,7 @@ const jumpToCfiAndClose = async (cfiOrHref) => {
     console.error("跳转失败:", error);
   } finally {
     // 5. 缓慢揭开黑幕
-    if (mask) {
-      mask.style.transition = 'opacity 0.2s ease';
-      mask.style.opacity = '0';
-      mask.style.pointerEvents = 'none';
-    }
+    toggleMask(false, { type: 'global' });
     isJumpLocked = false; 
     
     if (rendition.getContents().length > 0) {
@@ -1236,7 +1214,9 @@ const handleRelocated = (location) => {
         saveProgressToBackend(`unit-${targetUnit}`, targetUnit / total); 
       }
     }
-  } catch (e) { console.error("Radar Error", e); }
+  } catch (e) {
+    console.error("Radar Error", e); 
+  } 
 };
 
 const handleSelection = (cfiRange, contents) => {
@@ -1254,6 +1234,35 @@ const handleSelection = (cfiRange, contents) => {
 // 4. 分页与排版 (秒开极简版)
 // ==========================================
 let saveTimer = null;
+
+// 🎭 终极黑幕调度器 (默认有动画)
+const toggleMask = (visible, options = {}) => {
+  const mask = maskRef.value;
+  if (!mask) return;
+
+  const type = options.type || 'local';
+  const animate = options.animate !== undefined ? options.animate : true; // 默认带动画
+
+  if (type === 'global') {
+    mask.style.position = 'fixed';
+    mask.style.zIndex = '9999'; 
+  } else {
+    mask.style.position = 'absolute';
+    mask.style.zIndex = '25';   
+  }
+
+  if (visible) {
+    mask.style.transition = 'none';
+    mask.offsetHeight; 
+    mask.style.opacity = '1';
+    mask.style.pointerEvents = 'auto';
+  } else {
+    mask.style.transition = animate ? 'opacity 0.2s ease' : 'none';
+    mask.offsetHeight;
+    mask.style.opacity = '0';
+    mask.style.pointerEvents = 'none';
+  }
+};
 
 const saveProgressToBackend = (cfi, progress, immediate = false) => {
   localStorage.setItem(`offline_progress_${props.book.id}`, cfi);
@@ -1308,13 +1317,7 @@ const jumpToTargetPage = async () => {
   isJumpLocked = true;
   
   // 3. 瞬间拉下物理黑幕
-  const mask = maskRef.value;
-  if (mask) {
-    mask.style.transition = 'none'; 
-    mask.offsetHeight;              
-    mask.style.opacity = '1';
-    mask.style.pointerEvents = 'auto';
-  }
+  toggleMask(true, { type: 'global' });
   
   // ✨ 4. 绝对死等：强迫浏览器把黑幕渲染到物理屏幕上
   await waitForPaint();
@@ -1338,11 +1341,7 @@ const jumpToTargetPage = async () => {
   await waitForPaint();
 
   //8. 缓慢揭开黑幕
-  if (mask) {
-    mask.style.transition = 'opacity 0.2s ease';
-    mask.style.opacity = '0';
-    mask.style.pointerEvents = 'none';
-  }
+  toggleMask(false, { type: 'global' });
   
   isJumpLocked = false;
   handleRelocated();
@@ -1359,45 +1358,60 @@ const cycleFontSize = async () => {
 
     isJumpLocked = true; 
 
-    // ✨ 1. 拉下物理黑幕（遮住重绘的闪烁）
-    const mask = maskRef.value;
-    if (mask) {
-      mask.style.transition = 'none';
-      mask.offsetHeight; 
-      mask.style.opacity = '1';
-      mask.style.pointerEvents = 'auto';
-    }
+    // 1. 瞬间拉下局部黑幕 (听你的，这里无动画秒切)
+    toggleMask(true, { type: 'local', animate: false });
     await waitForPaint();
 
-    // 2. 改变字号并空降归位
+    // 2. 注入新字号 (这会导致异步的 CSS 重排)
     rendition.themes.fontSize(`${currentFontSize.value}%`);   
+    
+    // ✨ 核心破局点：强制同步排版 (Synchronous Reflow)
+    // 彻底干掉 50ms 定时器！读取 offsetHeight 会强迫浏览器立刻停下所有动作，
+    // 瞬间把全书每一个字在新字号下的物理位置全部死算完！
+    // 这一句执行完，排版就 100% 绝对稳固了，状态跟 rendition.display() 一模一样！
+    const tempContents = rendition.getContents()[0];
+    if (tempContents) {
+      void tempContents.document.documentElement.offsetHeight; 
+    }
+
+    // 3. 完美复刻“目录跳转”的执行流 (直接抄作业)
     const targetUnit = currentPage.value;  
     if (unitMap.length > 0 && targetUnit !== '-') {
       const mapItem = unitMap.find(m => targetUnit >= m.start && targetUnit <= m.end);
       if (mapItem) {
         const preciseId = `unit-${targetUnit}`;
+        
+        // 由于上面强制了排版，这里的 preciseDisplay 算出来的坐标绝对精准
         await preciseDisplay(`${mapItem.href}#${preciseId}`);
         
-        // 3. 必须保留的手动重绘（因为没走 Hook）
-        const contents = rendition.getContents()[0];
-        if (contents) {
-          selectionOverlayRef.value?.renderAnnotationsForCurrentChapter(contents);
-          await waitForPaint(contents); // 死等重绘完成
+        const finalContents = rendition.getContents()[0];
+        if (finalContents) {
+          await selectionOverlayRef.value?.renderAnnotationsForCurrentChapter(finalContents);
+          await waitForPaint(finalContents); // 死等高亮画完
         }
       }
     }
 
-    // ✨ 4. 缓慢揭开黑幕
-    if (mask) {
-      mask.style.transition = 'opacity 0.2s ease';
-      mask.style.opacity = '0';
-      mask.style.pointerEvents = 'none';
-    }
+    // 4. 抄目录跳转的最后一步：保留 150ms 的 Vue DOM 消化时间
+    await new Promise(resolve => setTimeout(resolve, 150));
+    await waitForPaint();
 
     isJumpLocked = false;
     handleRelocated(); 
 
-    // 发送后端请求...
+    // 5. 瞬间揭开局部黑幕 (无动画，纯硬切，菜单栏不受影响)
+    toggleMask(false, { type: 'local', animate: false });
+
+    // 6. 保存进度
+    if (currentPage.value !== '-') {
+      const total = props.book.total_units ? props.book.total_units - 1 : 1;
+      saveProgressToBackend(`unit-${currentPage.value}`, currentPage.value / total, true);
+    }
+
+  } catch (e) {
+    console.error("切换字号失败:", e);
+    isJumpLocked = false;
+    toggleMask(false, { type: 'local', animate: false });
   } finally {
     isChangingFont = false;
   }
@@ -1484,10 +1498,10 @@ const jumpToNextChapter = async () => {
 }
 
 .mask {
-  position: fixed;
+  position: absolute;
   inset: 0;
   background-color: #000000;
-  z-index: 9999;
+  z-index: 25;
   opacity: 1;
   pointer-events: auto; /* 默认状态下允许点击穿透 */
   transition: opacity 0.3s ease; /* 默认带有淡出动画 */
