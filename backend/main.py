@@ -351,9 +351,11 @@ async def save_progress(book_id: str, payload: dict, user_token: Optional[str] =
 
     cfi = payload.get("cfi")
     percent = payload.get("percent", 0)
+    # ✨ 修改 1：从前端发来的 payload 中提取 font_size，如果没有默认给 100
+    font_size = payload.get("font_size", 100)
 
-    # ✨ 完美衔接：直接调用 database.py 里写好的护城河逻辑！
-    await update_reading_progress(user_id, book_id, cfi, percent)
+    # ✨ 修改 2：把提取到的 font_size 一并传给炼金护城河逻辑！
+    await update_reading_progress(user_id, book_id, cfi, percent, font_size)
     
     return {"status": "success"}
 

@@ -109,18 +109,19 @@ async def save_tts_position(user_id: int, book_id: str, tts_cfi: str):
         """, (tts_cfi, user_id, book_id))
         await db.commit()
         
-async def update_reading_progress(user_id: int, book_id: str, cfi: str, percentage: float):
+async def update_reading_progress(user_id: int, book_id: str, cfi: str, percentage: float, font_size: int = 100):
     """
     🌟 进度保存中枢（完美版）：安全更新阅读进度，绝不误伤 TTS 进度！
     """
     async with aiosqlite.connect(DB_PATH) as db:
-        # 使用 UPSERT 语法：插入新数据，如果主键冲突则只更新指定的字段
+        # 魔法升级：把 font_size 也加进水晶球里！
         await db.execute("""
-            INSERT INTO user_books (user_id, book_id, current_cfi, progress_percentage, last_read_at)
-            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            INSERT INTO user_books (user_id, book_id, current_cfi, progress_percentage, font_size, last_read_at)
+            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(user_id, book_id) DO UPDATE SET 
                 current_cfi = excluded.current_cfi,
                 progress_percentage = excluded.progress_percentage,
+                font_size = excluded.font_size, -- ✨ 这里更新字号
                 last_read_at = CURRENT_TIMESTAMP
-        """, (user_id, book_id, cfi, percentage))
+        """, (user_id, book_id, cfi, percentage, font_size))
         await db.commit()
