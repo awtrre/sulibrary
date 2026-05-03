@@ -1135,7 +1135,7 @@ const toggleBookmark = () => {
   
   const existingIndexes = bookmarksList.value.reduce((acc, b, index) => {
     const bUnit = parseInt(String(b.unit).split('-')[0], 10);
-    if (bUnit >= visibleUnitRange.value.start && bUnit <= visibleUnitRange.value.end) {
+    if (bUnit >= visibleUnitRange.value.start&& bUnit <= visibleUnitRange.value.end) {
       acc.push(index);
     }
     return acc;
@@ -1181,7 +1181,7 @@ const toggleBookmark = () => {
 
     const newBookmark = {
       id: Date.now(), // 毫秒时间戳作为 ID
-      unit: currentPage.value,
+      unit: visibleUnitRange.value.end,
       time: Date.now(),
       text: snippet
     };
@@ -1251,62 +1251,87 @@ const handleRelocated = (location) => {
     const contents = rendition.getContents()[0];
     if (!contents) return;
 
-    const iframe = contents.document.defaultView.frameElement;
-    const iframeOffset = iframe.getBoundingClientRect().left; 
-    const targets = Array.from(contents.document.querySelectorAll('.sync-anchor'));
+    const iframeDoc = contents.document;
+    const iframe = iframeDoc.defaultView.frameElement;
+    const iframeOffset = iframe.getBoundingClientRect().left;
+    const viewWidth = window.innerWidth;
     
-    const visibleAnchors = targets.filter(el => {
+    // 1. 获取所有锚点并筛选出屏幕可见的
+    const allAnchors = Array.from(iframeDoc.querySelectorAll('.sync-anchor'));
+    const visibleAnchors = allAnchors.filter(el => {
       const rect = el.getBoundingClientRect();
       const absLeft = rect.left + iframeOffset;
-      return absLeft >= -10 && absLeft < window.innerWidth + 10;
+      return absLeft >= -10 && absLeft < viewWidth + 10;
     });
 
+    let firstV = null;
+    let lastV = null;
+
     if (visibleAnchors.length > 0) {
+      // --- 正常情况：屏幕内直接扫到锚点 ---
       const firstMatch = visibleAnchors[0].id.match(/unit-(\d+)/);
+      if (firstMatch) firstV = parseInt(firstMatch[1], 10);
+      
       const lastMatch = visibleAnchors[visibleAnchors.length - 1].id.match(/unit-(\d+)/);
+      if (lastMatch) lastV = parseInt(lastMatch[1], 10);
+      
+    } else {
+      // --- 异常情况：空窗期（章节末尾或全图无锚点），启用影子追溯 ---
+      const range = rendition.getRange(rendition.currentLocation().start.cfi);
+      let node = range.startContainer;
+      if (node.nodeType === Node.TEXT_NODE) node = node.parentNode;
 
-      if (firstMatch && lastMatch) {
-        const firstUnit = parseInt(firstMatch[1]);
-        const lastUnit = parseInt(lastMatch[1]);
-
-        // ✨ 核心修复：视觉黏性逻辑
-        // 拿到当前的页码，判断它是否还在屏幕的“视野范围内”
-        let targetUnit = currentPage.value;
-        
-        // 如果当前还没页码（刚进书），或者当前页码彻底不在屏幕上了（用户真实翻页了）
-        // 我们才把页码更新为屏幕上的第一个 unit
-        if (targetUnit === '-' || targetUnit < firstUnit || targetUnit > lastUnit) {
-          targetUnit = firstUnit;
-        }
-
-        // 同步所有状态为最终决定的 targetUnit
-        currentPage.value = targetUnit;
-        inputPage.value = targetUnit;
-        visibleUnitRange.value = { start: firstUnit, end: lastUnit }; 
-        syncChapterName(targetUnit);
-
-        const loc = rendition.currentLocation();
-        if (loc && cachedToc.length > 0) {
-          const currentSpine = epubBook.spine.get(loc.start.href.split('#')[0]);
-          if (currentSpine) {
-            // 倒序遍历目录，找到第一个 "在书籍结构中不晚于当前位置" 的节点
-            const match = [...cachedToc].reverse().find(t => {
-              const tSpine = epubBook.spine.get(t.href.split('#')[0]);
-              return tSpine && tSpine.index <= currentSpine.index;
-            });
-            // 去除目录排版可能带的前置空格
-            if (match) currentChapterName.value = match.label.replace(/^[　\s]+/, '');
+      let foundNode = null;
+      let checkNode = node;
+      
+      while (checkNode && checkNode !== iframeDoc.body) {
+        let sibling = checkNode;
+        while (sibling) {
+          if (sibling.classList && sibling.classList.contains('sync-anchor')) {
+            foundNode = sibling;
+            break;
           }
+          sibling = sibling.previousElementSibling;
         }
+        if (foundNode) break;
+        checkNode = checkNode.parentNode;
+      }
 
-        // 上报进度时，也精准上报 targetUnit，而不是盲目上报 visibleAnchors[0]
-        const total = totalPages.value || 1;
-        saveProgressToBackend(`unit-${targetUnit}`, targetUnit / total); 
+      if (foundNode) {
+        const match = foundNode.id.match(/unit-(\d+)/);
+        if (match) {
+          firstV = parseInt(match[1], 10);
+          lastV = firstV; // 追溯模式下，可视区间首尾都当做这个节点
+        }
       }
     }
+
+    // 2. ✨ 核心防御：视觉黏性逻辑
+    if (firstV !== null) {
+      // 拿到系统当前记录的页码（即你刚才跳转过去的目标页码）
+      let targetUnit = currentPage.value !== '-' ? parseInt(currentPage.value, 10) : '-';
+      
+      // 灵魂拷问：当前页码是否已经“彻底跌出屏幕”？
+      // 如果跌出了（或者根本还没初值），说明是真实的翻页，雷达接管并更新为屏幕首项
+      if (targetUnit === '-' || targetUnit < firstV || targetUnit > lastV) {
+        targetUnit = firstV;
+      }
+      // 如果没跌出屏幕（即 firstV <= targetUnit <= lastV），
+      // 说明这就是你刚才精准空降的位置，保持原样，绝不篡改！
+
+      // 3. 统一派发更新
+      currentPage.value = targetUnit;
+      inputPage.value = targetUnit;
+      visibleUnitRange.value = { start: firstV, end: lastV }; 
+      syncChapterName(targetUnit);
+
+      const total = totalPages.value || 1;
+      saveProgressToBackend(`unit-${targetUnit}`, targetUnit / total); 
+    }
+    
   } catch (e) {
-    console.error("Radar Error", e); 
-  } 
+    console.error("Radar Error", e);
+  }
 };
 
 const handleSelection = (cfiRange, contents) => {
@@ -1438,16 +1463,23 @@ const jumpToTargetPage = async () => {
 const turnPage = async (direction) => {
   let isCrossChapter = false;
 
-  // 1. 🔍 预判：基于藏宝图和当前屏幕视野，判断是否即将跨章
-  if (unitMap.length > 0 && visibleUnitRange.value.start !== -1) {
-    const currentMapItem = unitMap.find(m => visibleUnitRange.value.start >= m.start && visibleUnitRange.value.start <= m.end);
-    if (currentMapItem) {
-      // 如果下一页，且当前屏幕已经包含了本章最后一个 unit
-      if (direction === 'next' && visibleUnitRange.value.end >= currentMapItem.end) {
+  // 1. 🔍 终极物理预判：直接读取 EPUB.js 引擎底层的真实滚动容器！
+  if (rendition.manager && rendition.manager.container) {
+    const container = rendition.manager.container;
+    
+    // 取整抹平浏览器的亚像素浮点数误差
+    const scrollLeft = Math.round(container.scrollLeft);
+    const clientWidth = Math.round(container.clientWidth);
+    const scrollWidth = Math.round(container.scrollWidth);
+
+    if (direction === 'next') {
+      // 当前已滚动的距离 + 视口的宽度 >= 章节总物理宽度 (加 10px 容错)
+      if (scrollLeft + clientWidth >= scrollWidth - 10) {
         isCrossChapter = true;
-      } 
-      // 如果上一页，且当前屏幕包含了本章第一个 unit
-      else if (direction === 'prev' && visibleUnitRange.value.start <= currentMapItem.start) {
+      }
+    } else if (direction === 'prev') {
+      // 往回翻，看滚动条是不是已经贴到最左侧了
+      if (scrollLeft <= 10) {
         isCrossChapter = true;
       }
     }
@@ -1457,7 +1489,7 @@ const turnPage = async (direction) => {
   if (isCrossChapter) {
     isTurningPage.value = true;
     isJumpLocked = true;
-    toggleMask(true, { type: 'local', animate: false }); // 纯硬切黑幕，不干扰全局
+    toggleMask(true, { type: 'local', animate: false }); 
     await waitForPaint();
   }
 
@@ -1468,20 +1500,18 @@ const turnPage = async (direction) => {
     await rendition.prev();
   }
 
-  // 4. 落地核验：如果是跨章，死等高亮画完再揭幕
+  // 4. 🏁 落地核验：死等高亮画完再揭幕
   if (isCrossChapter) {
-    const contents = rendition.getContents()[0];
-    if (contents) {
-      await selectionOverlayRef.value?.renderAnnotationsForCurrentChapter(contents);
-      await waitForPaint(contents); // 核心：死等 iframe 内部把颜色填好
+    const finalContents = rendition.getContents()[0];
+    if (finalContents) {
+      await selectionOverlayRef.value?.renderAnnotationsForCurrentChapter(finalContents);
+      await waitForPaint(finalContents); 
     }
-    toggleMask(false, { type: 'local' }); // 缓慢揭开黑幕
+    toggleMask(false, { type: 'local' }); 
     isJumpLocked = false;
-    handleRelocated(); // 黑幕揭开瞬间，立刻同步雷达
+    handleRelocated(); 
     isTurningPage.value = false;
   }
-  
-  // 注意：isTurningPage 会在你的 handleRelocated 触发的 'relocated' 事件回调中被安全重置为 false
 };
 
 const cycleFontSize = async () => {
