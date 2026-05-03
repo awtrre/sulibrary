@@ -14,6 +14,15 @@
         </svg>
       </div>
 
+      <div 
+        v-show="currentPage !== '-'"
+        :class="isTurningPage ? 'opacity-0' : 'opacity-100'"
+        class="absolute bottom-2 left-6 right-6 flex justify-between items-end z-10 pointer-events-none text-xs text-neutral-500 font-mono transition-opacity duration-300"
+      >
+        <span class="truncate max-w-[70%]">{{ currentChapterName }}</span>
+        <span>{{ currentPage }}/{{ totalPages }}</span>
+      </div>
+
       <SelectionOverlay 
         ref="selectionOverlayRef" 
         v-if="rendition" 
@@ -169,6 +178,24 @@ const props = defineProps({
 
 const emit = defineEmits(['close']);
 // 🪄 强制等待真实屏幕绘制的黑魔法 (Vue + Iframe 双重护盾版)
+const syncChapterName = (unit) => {
+  if (!unit || unit === '-' || cachedToc.length === 0 || unitMap.length === 0) return;
+  
+  // 1. 从藏宝图里直接拿绝对路径，不依赖原生位置对象
+  const currentMapItem = unitMap.find(m => unit >= m.start && unit <= m.end);
+  if (!currentMapItem) return;
+
+  const currentSpine = epubBook.spine.get(currentMapItem.href.split('#')[0]);
+  if (!currentSpine) return;
+
+  // 2. 匹配目录
+  const match = [...cachedToc].reverse().find(t => {
+    const tSpine = epubBook.spine.get(t.href.split('#')[0]);
+    return tSpine && tSpine.index <= currentSpine.index;
+  });
+
+  if (match) currentChapterName.value = match.label.replace(/^[　\s]+/, '');
+};
 const waitForPaint = async (contents = null) => {
   // 1. 等待 Vue 自身的 DOM 队列彻底清空
   await nextTick(); 
@@ -224,6 +251,8 @@ const visibleUnitRange = ref({ start: -1, end: -1 });
 const currentFontSize = ref(100);
 const annotationsList = ref([]);
 const bookmarksList = ref([]);
+const currentChapterName = ref('');
+let cachedToc = [];
 let isJumpLocked = false;
 let isChangingFont = false;
 const isTurningPage = ref(false);
@@ -432,6 +461,11 @@ const initReader = async () => {
   try {
     // 1. 实例化书籍
     epubBook = ePub(`/api/static/books/${props.book.id}/`); 
+
+    epubBook.loaded.navigation.then(nav => {
+      const flatten = (items) => items.reduce((acc, item) => acc.concat(item, item.subitems ? flatten(item.subitems) : []), []);
+      cachedToc = flatten(nav.toc);
+    });
 
     // 2. 进度拉取逻辑
     let savedCfi = null;
@@ -690,7 +724,7 @@ const initReader = async () => {
             currentPage.value = currentUnit;
             inputPage.value = currentUnit;
             visibleUnitRange.value = { start: currentUnit, end: lastUnit }; 
-
+            syncChapterName(currentUnit);
             const total = totalPages.value || 1;
             saveProgressToBackend(firstAnchor.id, currentUnit / total); 
           }
@@ -1249,6 +1283,21 @@ const handleRelocated = (location) => {
         currentPage.value = targetUnit;
         inputPage.value = targetUnit;
         visibleUnitRange.value = { start: firstUnit, end: lastUnit }; 
+        syncChapterName(targetUnit);
+
+        const loc = rendition.currentLocation();
+        if (loc && cachedToc.length > 0) {
+          const currentSpine = epubBook.spine.get(loc.start.href.split('#')[0]);
+          if (currentSpine) {
+            // 倒序遍历目录，找到第一个 "在书籍结构中不晚于当前位置" 的节点
+            const match = [...cachedToc].reverse().find(t => {
+              const tSpine = epubBook.spine.get(t.href.split('#')[0]);
+              return tSpine && tSpine.index <= currentSpine.index;
+            });
+            // 去除目录排版可能带的前置空格
+            if (match) currentChapterName.value = match.label.replace(/^[　\s]+/, '');
+          }
+        }
 
         // 上报进度时，也精准上报 targetUnit，而不是盲目上报 visibleAnchors[0]
         const total = totalPages.value || 1;
@@ -1387,7 +1436,6 @@ const jumpToTargetPage = async () => {
 };
 
 const turnPage = async (direction) => {
-  isTurningPage.value = true;
   let isCrossChapter = false;
 
   // 1. 🔍 预判：基于藏宝图和当前屏幕视野，判断是否即将跨章
@@ -1407,6 +1455,7 @@ const turnPage = async (direction) => {
 
   // 2. 🎬 跨章前夕：瞬间拉下局部黑幕并锁死雷达
   if (isCrossChapter) {
+    isTurningPage.value = true;
     isJumpLocked = true;
     toggleMask(true, { type: 'local', animate: false }); // 纯硬切黑幕，不干扰全局
     await waitForPaint();
@@ -1429,6 +1478,7 @@ const turnPage = async (direction) => {
     toggleMask(false, { type: 'local' }); // 缓慢揭开黑幕
     isJumpLocked = false;
     handleRelocated(); // 黑幕揭开瞬间，立刻同步雷达
+    isTurningPage.value = false;
   }
   
   // 注意：isTurningPage 会在你的 handleRelocated 触发的 'relocated' 事件回调中被安全重置为 false
