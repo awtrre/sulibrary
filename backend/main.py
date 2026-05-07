@@ -214,7 +214,7 @@ def _inject_sync_anchors(target_dir: str) -> int:
         start_unit = total_units
 
         # --- 这里是修改的核心部分：按页面从上到下的真实顺序统一打标 ---
-        elements = soup.find_all(['img', 'svg', 'image', 'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'a', 'li', 'div', 'span'])
+        elements = soup.find_all(['img', 'svg', 'image', 'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'a', 'li', 'div', 'span', 'blockquote', 'td', 'th', 'figcaption', 'dt', 'dd'])
         for el in elements:
             if el.name in ['img', 'svg', 'image']:
                 # 处理图片
@@ -223,27 +223,40 @@ def _inject_sync_anchors(target_dir: str) -> int:
                 if isinstance(classes, str): classes = [classes]
                 el['class'] = classes + ['sync-anchor']
                 total_units += 1
+                
             else:
                 # 文本切碎
-                if el.find(['img', 'svg', 'image']): continue
                 for text_node in el.find_all(string=True):
+                    
+                    # 🛡️ 第一道防线（修正 1）：必须放在最前面！
+                    # 严格过滤，直接将 HTML 注释 (Comment) 等非纯文本对象拒之门外
+                    if type(text_node) is not NavigableString: 
+                        continue
+
+                    # 提取文字，如果是纯空白则跳过
                     text = text_node.text
                     if not text.strip(): continue
+
+                    # 🛡️ 第二道防线（修正 2）：穿透查找祖先！
+                    # 增加 'math' 和 'svg'，保护多层嵌套的拼音、代码块、公式和图表不被碎尸万段
+                    protected_parent = text_node.find_parent(['ruby', 'pre', 'code', 'math', 'svg'])
+                    if protected_parent:
+                        if not protected_parent.has_attr('id'):
+                            protected_parent['id'] = f"unit-{total_units}"
+                            p_classes = protected_parent.get('class', [])
+                            if isinstance(p_classes, str): p_classes = [p_classes]
+                            protected_parent['class'] = p_classes + ['sync-anchor']
+                            total_units += 1
+                        continue
+
+                    # 🛡️ 第三道防线：检查普通的直系父节点是否已经打过标（防止重复打标）
                     parent = text_node.parent
                     parent_classes = parent.get('class', []) if parent else []
                     if isinstance(parent_classes, str): parent_classes = [parent_classes]
                     if 'sync-anchor' in parent_classes:
                         continue
-
-                    if parent and parent.name in ['ruby', 'rt', 'rp', 'pre', 'code']:
-                        if not parent.has_attr('id'):
-                            parent['id'] = f"unit-{total_units}"
-                            parent_classes = parent.get('class', [])
-                            if isinstance(parent_classes, str): parent_classes = [parent_classes]
-                            parent['class'] = parent_classes + ['sync-anchor']
-                            total_units += 1
-                        continue
                     
+                    # ⚔️ 突破防线后的正常文本，执行正则切片碎尸逻辑
                     sentences = re.findall(r'[^。！？!?\.\…]+[。！？!?\.\…]+[”’"\'\)\]）】》]*|.+', text)
                     if not sentences: continue
                     fragment = soup.new_tag("span")
@@ -255,7 +268,13 @@ def _inject_sync_anchors(target_dir: str) -> int:
                         total_units += 1
                     text_node.replace_with(fragment)
                     fragment.unwrap()
-        # --- 修改核心部分结束 ---
+
+        if total_units == start_unit and soup.body:
+            soup.body['id'] = f"unit-{total_units}"
+            body_classes = soup.body.get('class', [])
+            if isinstance(body_classes, str): body_classes = [body_classes]
+            soup.body['class'] = body_classes + ['sync-anchor']
+            total_units += 1
 
         with open(filepath, 'w', encoding='utf-8') as f:
             f.write(str(soup))

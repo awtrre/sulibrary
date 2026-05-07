@@ -178,23 +178,55 @@ const props = defineProps({
 
 const emit = defineEmits(['close']);
 // 🪄 强制等待真实屏幕绘制的黑魔法 (Vue + Iframe 双重护盾版)
-const syncChapterName = (unit) => {
-  if (!unit || unit === '-' || cachedToc.length === 0 || unitMap.length === 0) return;
+const syncChapterName = () => {
+  if (cachedToc.length === 0 || !rendition) return;
   
-  // 1. 从藏宝图里直接拿绝对路径，不依赖原生位置对象
-  const currentMapItem = unitMap.find(m => unit >= m.start && unit <= m.end);
-  if (!currentMapItem) return;
+  const location = rendition.currentLocation();
+  if (!location) return;
 
-  const currentSpine = epubBook.spine.get(currentMapItem.href.split('#')[0]);
-  if (!currentSpine) return;
+  const currentEndCfi = location.end?.cfi || location.start?.cfi;
+  const currentEndHref = location.end?.href || location.start?.href;
+  if (!currentEndHref) return;
 
-  // 2. 匹配目录
-  const match = [...cachedToc].reverse().find(t => {
-    const tSpine = epubBook.spine.get(t.href.split('#')[0]);
-    return tSpine && tSpine.index <= currentSpine.index;
-  });
+  const currentSpineItem = epubBook.spine.get(currentEndHref);
+  const currentIndex = currentSpineItem ? currentSpineItem.index : -1;
+  if (currentIndex === -1) return;
 
-  if (match) currentChapterName.value = match.label.replace(/^[　\s]+/, '');
+  const cfiParser = new ePub.CFI();
+  const contents = rendition.getContents()[0];
+  let activeItem = null;
+
+  for (let i = 0; i < cachedToc.length; i++) {
+    const item = cachedToc[i];
+    const tocSpineItem = epubBook.spine.get(item.href);
+
+    if (tocSpineItem) {
+      if (tocSpineItem.index < currentIndex) {
+        activeItem = item;
+      } else if (tocSpineItem.index === currentIndex) {
+        let itemCfi = null;
+        const hashIndex = item.href.indexOf('#');
+
+        if (hashIndex !== -1 && contents) {
+          const hashId = item.href.substring(hashIndex + 1);
+          const targetNode = contents.document.getElementById(hashId);
+          if (targetNode) itemCfi = contents.cfiFromNode(targetNode);
+        }
+
+        if (itemCfi && currentEndCfi) {
+          if (cfiParser.compare(currentEndCfi, itemCfi) >= 0) activeItem = item;
+        } else {
+          activeItem = item;
+        }
+      } else {
+        break; 
+      }
+    }
+  }
+
+  if (activeItem) {
+    currentChapterName.value = activeItem.label.replace(/^[　\s]+/, '');
+  }
 };
 const waitForPaint = async (contents = null) => {
   // 1. 等待 Vue 自身的 DOM 队列彻底清空
@@ -724,7 +756,7 @@ const initReader = async () => {
             currentPage.value = currentUnit;
             inputPage.value = currentUnit;
             visibleUnitRange.value = { start: currentUnit, end: lastUnit }; 
-            syncChapterName(currentUnit);
+            syncChapterName();
             const total = totalPages.value || 1;
             saveProgressToBackend(firstAnchor.id, currentUnit / total); 
           }
@@ -1164,14 +1196,52 @@ const toggleBookmark = () => {
       if (loc && loc.start?.cfi && loc.end?.cfi) {
         const startRange = rendition.getRange(loc.start.cfi);
         const endRange = rendition.getRange(loc.end.cfi);
+        
         if (startRange && endRange) {
           const contents = rendition.getContents()[0];
+          
+          // 获取当前屏幕在 iframe 坐标系内的绝对物理左边界
+          const iframe = contents.document.defaultView.frameElement;
+          const currentScreenLeft = -(iframe.getBoundingClientRect().left); 
+          
+          let trueContainer = startRange.startContainer;
+          let trueOffset = startRange.startOffset;
+
+          // 补丁：如果 Epub.js 粗放地定位在了 <p> 或 <span> 元素上，强制下沉找到真实文本节点
+          if (trueContainer.nodeType !== Node.TEXT_NODE) {
+            const walker = contents.document.createTreeWalker(trueContainer, NodeFilter.SHOW_TEXT, null, false);
+            const firstText = walker.nextNode();
+            if (firstText) {
+              trueContainer = firstText;
+              trueOffset = 0;
+            }
+          }
+
+          // ✨ 核心手术：逐字扫描，物理切除上一页的半截“残句”
+          if (trueContainer && trueContainer.nodeType === Node.TEXT_NODE) {
+            const tempRange = contents.document.createRange();
+            const textLen = trueContainer.length;
+            
+            for (let i = trueOffset; i < textLen; i++) {
+              tempRange.setStart(trueContainer, i);
+              tempRange.setEnd(trueContainer, i + 1);
+              const rect = tempRange.getBoundingClientRect();
+              
+              // 判断字符的左边缘是否已经踏入了当前屏幕的视口（-10px 为容错，防止吞掉贴边的标点）
+              if (rect.width > 0 && rect.left >= currentScreenLeft - 10) {
+                trueOffset = i; // 锁定：这就是本页残句的真正第一个字！
+                break;
+              }
+            }
+          }
+
           const fullScreenRange = contents.document.createRange();
-          fullScreenRange.setStart(startRange.startContainer, startRange.startOffset);
+          fullScreenRange.setStart(trueContainer, trueOffset);
           fullScreenRange.setEnd(endRange.startContainer, endRange.startOffset);
+          
           const cleanText = fullScreenRange.toString().trim().replace(/\s+/g, ' ');
           if (cleanText) {
-            snippet = cleanText.length > 80 ? cleanText.substring(0, 80) + '...' : cleanText;
+            snippet = cleanText.substring(0, 150);
           }
         }
       }
@@ -1181,7 +1251,7 @@ const toggleBookmark = () => {
 
     const newBookmark = {
       id: Date.now(), // 毫秒时间戳作为 ID
-      unit: visibleUnitRange.value.end,
+      unit: visibleUnitRange.value.start,
       time: Date.now(),
       text: snippet
     };
@@ -1323,7 +1393,7 @@ const handleRelocated = (location) => {
       currentPage.value = targetUnit;
       inputPage.value = targetUnit;
       visibleUnitRange.value = { start: firstV, end: lastV }; 
-      syncChapterName(targetUnit);
+      syncChapterName();
 
       const total = totalPages.value || 1;
       saveProgressToBackend(`unit-${targetUnit}`, targetUnit / total); 
